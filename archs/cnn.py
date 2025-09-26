@@ -28,7 +28,7 @@ class CustomCNN(nn.Module):
         self.dr1 = nn.Dropout(0.2)
         self.maxPol3 = nn.MaxPool2d(2, 2)
         self.flat = nn.Flatten()
-        self.lin = None
+        self.lin = nn.Linear(62, 10)
     def forward(self, x):
         x = self.conv1(x)
         x = self.relu1(x)
@@ -44,10 +44,10 @@ class CustomCNN(nn.Module):
         x = self.dr1(x)
         x = self.maxPol3(x)
         x = self.flat(x)
-        if self.lin is None:
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            in_features = x.shape[1]
-            self.lin = nn.Linear(in_features, 10).to(x.device)
+        #if self.lin is None:
+        #    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        #    in_features = x.shape[1]
+        #    self.lin = nn.Linear(in_features, 10).to(x.device)
         x = self.lin(x)
         return x
     
