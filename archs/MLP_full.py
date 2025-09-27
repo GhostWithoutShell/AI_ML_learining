@@ -5,6 +5,7 @@ import torch.nn as nn
 import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
+from torchvision.transforms import v2
 import seaborn
 from sklearn.metrics import confusion_matrix
 import numpy as np
@@ -35,7 +36,7 @@ class CustomMLP(nn.Module):
 
 # Data transformations
 transform_train = transforms.Compose([
-    transforms.RandomRotation(0,10),
+    transforms.RandomRotation(degrees=(0,10)),
     transforms.ToTensor(),
     transforms.Normalize((0.5), (0.5))
 ])
@@ -95,9 +96,9 @@ for epoch in range(num_epoch):
             _, predicted = torch.max(output_val, 1)
             val_correct += (predicted == labels_v).sum().item()
             val_corrects.append(val_correct)
-            total += labels_v.size(0)
+            val_total += labels_v.size(0)
             val_losses.append(loss)
-            print(f"Validation [{epoch+1}] val loss: {vall_loss}, val_correct :{val_correct}. Total : {total}")
+            print(f"Validation [{epoch+1}] val loss: {vall_loss}, val_correct :{val_correct}. Total : {val_total}")
 
 model.eval()
 correct = 0
