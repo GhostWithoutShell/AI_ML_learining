@@ -92,14 +92,15 @@ for epoch in range(num_epoch):
             images_v, labels_v = images_v.to(device), labels_v.to(device)
             output_val = model(images_v)
             loss = crptron(output_val, labels_v)
-            vall_loss = loss
+            val_loss = loss
             _, predicted = torch.max(output_val, 1)
             val_correct += (predicted == labels_v).sum().item()
-            val_corrects.append(val_correct)
+            
             val_total += labels_v.size(0)
             val_losses.append(loss)
-            print(f"Validation [{epoch+1}] val loss: {vall_loss}, val_correct :{val_correct}. Total : {val_total}")
-
+        val_corrects.append(val_correct)  
+        val_accuracy = val_correct / val_total
+    print(f"Validation [{epoch+1}] val loss: {val_loss}, val_correct :{val_correct}. Total : {val_total}, Accuracy validation : {val_accuracy} ")
 model.eval()
 correct = 0
 total = 0
@@ -124,13 +125,16 @@ print(cm)
 
 # Heatmap visualization
 sns.heatmap(cm, annot=True, fmt="d", cmap='Blues')
-plt.show()
+plt.plot(val_corrects, range(num_epoch))
+plt.ylabel("Validation corrects")
+plt.xlabel("Epochs")
 
+plt.show()
 # Save model
-torch.save(model.state_dict(), "mlp_model.pth")
+torch.save(model.state_dict(), "mlp_97_model.pth")
 
 # Test loading model
-del model
-model = CustomMLP()
-model.load_state_dict(torch.load("mlp_model.pth"))
-model.eval()
+#del model
+#model = CustomMLP()
+#model.load_state_dict(torch.load("mlp_model.pth"))
+#model.eval()
