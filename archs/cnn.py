@@ -7,9 +7,10 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 import seaborn
 from sklearn.metrics import confusion_matrix
-
+import seaborn as sns
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
+import numpy as np
 
 class CustomCNN(nn.Module):
     def __init__(self):
@@ -28,7 +29,7 @@ class CustomCNN(nn.Module):
         self.dr1 = nn.Dropout(0.2)
         self.maxPol3 = nn.MaxPool2d(2, 2)
         self.flat = nn.Flatten()
-        self.lin = nn.Linear(62, 10)
+        self.lin = nn.Linear(1024, 10)
     def forward(self, x):
         x = self.conv1(x)
         x = self.relu1(x)
@@ -44,10 +45,6 @@ class CustomCNN(nn.Module):
         x = self.dr1(x)
         x = self.maxPol3(x)
         x = self.flat(x)
-        #if self.lin is None:
-        #    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        #    in_features = x.shape[1]
-        #    self.lin = nn.Linear(in_features, 10).to(x.device)
         x = self.lin(x)
         return x
     
@@ -75,6 +72,7 @@ test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 model = CustomCNN().to(device)
+
 
 criterion = torch.nn.CrossEntropyLoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-5)
@@ -115,13 +113,13 @@ with torch.no_grad():
 
 print(f"Test Accuracy: {100 * correct / total:.2f}%")
 
-import numpy as np
+
 all_preds = np.concatenate(all_preds)
 all_labels = np.concatenate(all_labels)
 cm = confusion_matrix(all_labels, all_preds)
 print(cm)
 
-import seaborn as sns
+
 plt.figure(figsize=(8,6))
 sns.heatmap(cm, annot=True, fmt="d", cmap='Blues')
 plt.xlabel('Predicted')
