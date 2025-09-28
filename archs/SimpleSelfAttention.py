@@ -13,18 +13,21 @@ import matplotlib.pyplot as plt
 
 
 class SimpleAttention(nn.Module):
-    def __init(self, size_kernel, vocab_size):
+    def __init(self, size_kernel):
         super().__init__()
         self.size = size_kernel
-        self.key = torch.Tensor(size_kernel, vocab_size)
-        self.value = torch.Tensor(size_kernel, vocab_size)
-        self.query = torch.Tensor(size_kernel, vocab_size)
+        self.key = nn.Linear(size_kernel, size_kernel/2)
+        self.value = nn.Linear(size_kernel, size_kernel/2)
+        self.query = nn.Tensor(size_kernel, size_kernel/2)
     def forward(self, x):
-        transpose_k = torch.transpose(self.key, 0, 1)
-        attention_score = torch.mm(self.query, self.key)
+        transpose_k = torch.transpose(self.key, -2, -1)
+        
+        attention_score = torch.mm(self.query, transpose_k)
         scaled_scores = attention_score/int(self.size**0.5)
-        att_weight = torch.softmax(atte)
-        return att_weight * self.value
+        att_weight = torch.softmax(scaled_scores)
+        result_mat = att_weight * self.value
+        return torch.max(result_mat, dim=1)
+
 
 class TransformerClass(nn.Module):
     def __init__(self, vocab_size, embeding_dim, hidden_size):
