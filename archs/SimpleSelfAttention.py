@@ -18,14 +18,19 @@ class SimpleAttention(nn.Module):
         self.size = size_kernel
         self.key = nn.Linear(size_kernel, int(size_kernel/2))
         self.value = nn.Linear(size_kernel, int(size_kernel/2))
-        self.query = nn.Tensor(size_kernel, int(size_kernel/2))
+        self.query = nn.Linear(size_kernel, int(size_kernel/2))
     def forward(self, x):
-        transpose_k = torch.transpose(self.key.weight, -2, -1)
+        x_k = self.key(x)
+        x_v = self.value(x)
+        x_q = self.value(x)
+
+
+        transpose_k = torch.transpose(self.x_k, -2, -1)
         
-        attention_score = torch.mm(self.query.weight, transpose_k)
+        attention_score = torch.mm(self.x_q, transpose_k)
         scaled_scores = attention_score/int(self.size**0.5)
         att_weight = torch.softmax(scaled_scores)
-        result_mat = att_weight * self.value.weight
+        result_mat = att_weight * x_v
         return torch.max(result_mat, dim=1)
 
 
@@ -33,8 +38,8 @@ class TransformerClass(nn.Module):
     def __init__(self, vocab_size, embeding_dim, hidden_size):
         super().__init__()
         self.emb = nn.Embedding(vocab_size, embeding_dim)
-        self.attention = SimpleAttention(vocab_size, hidden_size)
-        feat_dim = hidden_size*hidden_size
+        self.attention = SimpleAttention(vocab_size)
+        feat_dim = vocab_size*vocab_size
         self.norm = nn.LayerNorm(feat_dim)
         self.lin = nn.Linear(feat_dim)
     def forward(self, x):
