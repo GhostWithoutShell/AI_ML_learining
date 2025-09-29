@@ -1,8 +1,8 @@
 import pandas as pd
 import torch
-import torchtext
-from torchtext.data.utils import get_tokenizer
-from torchtext.vocab import build_vocab_from_iterator
+#import torchtext
+#from torchtext.data.utils import get_tokenizer
+#from torchtext.vocab import build_vocab_from_iterator
 from sklearn.metrics import classification_report, confusion_matrix
 import seaborn as sns
 import numpy as np
@@ -10,6 +10,7 @@ import re
 from torch.utils.data import Dataset, DataLoader
 import torch.nn as nn
 import matplotlib.pyplot as plt
+import math
 
 
 class SimpleAttention(nn.Module):
@@ -22,15 +23,22 @@ class SimpleAttention(nn.Module):
     def forward(self, x):
         x_k = self.key(x)
         x_v = self.value(x)
-        x_q = self.value(x)
+        x_q = self.query(x)
 
 
-        transpose_k = torch.transpose(self.x_k, -2, -1)
+        print(f"Shape v :{x_v.shape}")
+        print(f"Shape q :{x_q.shape}")
+        print(f"Shape k :{x_k.shape}")
+
+        transpose_k = torch.transpose(x_k, -2, -1)
         
-        attention_score = torch.mm(self.x_q, transpose_k)
-        scaled_scores = attention_score/int(self.size**0.5)
-        att_weight = torch.softmax(scaled_scores)
-        result_mat = att_weight * x_v
+        attention_score = torch.matmul(x_q, transpose_k)
+        print(f"Transpose {transpose_k.shape}")
+        scaled_scores = attention_score/math.sqrt(self.size)
+        print(f"Scaled scores {scaled_scores}, shape {scaled_scores.shape}")
+        att_weight = torch.softmax(scaled_scores, dim=0)
+        print(f"Att weight {att_weight}, shape {att_weight.shape}")
+        result_mat = torch.matmul(att_weight, x_v)
         return torch.max(result_mat, dim=1)
 
 
@@ -49,4 +57,17 @@ class TransformerClass(nn.Module):
         x = self.lin(x)
         return x
         
-
+## tests
+#def test_attention():
+#    batch_size, seq_len, emb_dim = 2, 4, 8  # Маленькие размеры для дебага
+#    x = torch.randn(batch_size, seq_len, emb_dim)
+#    
+#    attention = SimpleAttention(emb_dim)  # Какой параметр должен быть?
+#    
+#    try:
+#        output = attention(x)
+#        #print(f"Success! Output shape: {output.shape}")
+#    except Exception as e:
+#        print(f"Error: {e}")
+#        # Анализируй ошибку!
+#test_attention()
