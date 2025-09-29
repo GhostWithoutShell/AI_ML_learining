@@ -36,10 +36,10 @@ class SimpleAttention(nn.Module):
         print(f"Transpose {transpose_k.shape}")
         scaled_scores = attention_score/math.sqrt(self.size)
         print(f"Scaled scores {scaled_scores}, shape {scaled_scores.shape}")
-        att_weight = torch.softmax(scaled_scores, dim=0)
+        att_weight = torch.softmax(scaled_scores, dim=1)
         print(f"Att weight {att_weight}, shape {att_weight.shape}")
         result_mat = torch.matmul(att_weight, x_v)
-        return torch.max(result_mat, dim=1)
+        return torch.mean(result_mat, dim=0)
 
 
 class TransformerClass(nn.Module):
