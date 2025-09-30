@@ -47,7 +47,7 @@ class TransformerClass(nn.Module):
         super().__init__()
         self.emb = nn.Embedding(vocab_size, embeding_dim)
         self.attention = SimpleAttention(hidden_size)
-        self.norm = nn.LayerNorm(hidden_size)
+        self.norm = nn.LayerNorm(hidden_size//2)
         self.lin = nn.Linear(hidden_size//2, 1)
     def forward(self, x):
         x = self.emb(x)
