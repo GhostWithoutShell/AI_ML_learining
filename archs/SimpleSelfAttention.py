@@ -39,14 +39,14 @@ class SimpleAttention(nn.Module):
         att_weight = torch.softmax(scaled_scores, dim=1)
         print(f"Att weight {att_weight}, shape {att_weight.shape}")
         result_mat = torch.matmul(att_weight, x_v)
-        return torch.mean(result_mat, dim=0)
+        return torch.mean(result_mat, dim=1)
 
 
 class TransformerClass(nn.Module):
     def __init__(self, vocab_size, embeding_dim, hidden_size):
         super().__init__()
         self.emb = nn.Embedding(vocab_size, embeding_dim)
-        self.attention = SimpleAttention(vocab_size)
+        self.attention = SimpleAttention(hidden_size)
         feat_dim = vocab_size*vocab_size
         self.norm = nn.LayerNorm(feat_dim)
         self.lin = nn.Linear(feat_dim)
@@ -58,16 +58,16 @@ class TransformerClass(nn.Module):
         return x
         
 ## tests
-#def test_attention():
-#    batch_size, seq_len, emb_dim = 2, 4, 8  # Маленькие размеры для дебага
-#    x = torch.randn(batch_size, seq_len, emb_dim)
-#    
-#    attention = SimpleAttention(emb_dim)  # Какой параметр должен быть?
-#    
-#    try:
-#        output = attention(x)
-#        #print(f"Success! Output shape: {output.shape}")
-#    except Exception as e:
-#        print(f"Error: {e}")
-#        # Анализируй ошибку!
-#test_attention()
+def test_attention():
+    batch_size, seq_len, emb_dim = 2, 4, 8  # Маленькие размеры для дебага
+    x = torch.randn(batch_size, seq_len, emb_dim)
+    
+    attention = SimpleAttention(emb_dim)  # Какой параметр должен быть?
+    
+    try:
+        output = attention(x)
+        print(f"Success! Output shape: {output.shape}")
+    except Exception as e:
+        print(f"Error: {e}")
+        # Анализируй ошибку!
+test_attention()
