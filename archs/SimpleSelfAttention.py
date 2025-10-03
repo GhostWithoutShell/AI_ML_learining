@@ -157,22 +157,23 @@ learning_rate = 1e-3
 optim = torch.optim.Adam(model.parameters(), lr = learning_rate)
 num_epochs = 10
 losses = []
+val_losses = []
 corrects = []
 valid_result = []
 val_loss, val_correct, val_total = 0.0, 0, 0
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optim, 'min', patience=3)
 for epoch in range(num_epochs):
     for inputs, labels in train_dataloader:
         input = inputs.to(device)
         labels = labels.to(device).unsqueeze(1).float()
         outputs = model(inputs)
         loss = loss_func(outputs, labels)
-        if loss >= 0.6:
-            optim.lr = optim.lr + 0.0001
         loss.backward()
         optim.step()
         optim.zero_grad()
         losses.append(loss.item())
     print(f'epoch {epoch}, loss : {loss.item()}')
+    scheduler.step()
     model.eval()
     #validation loop
     
@@ -183,10 +184,10 @@ for epoch in range(num_epochs):
             output_val = model(inputs_val)
             loss_val = loss_func(output_val, labels_val)
             val_loss = loss_val
-            _, predicted = torch.sigmoid(output_val, 0.8)
+            _, predicted = torch.sigmoid(output_val)
             val_correct += (predicted == labels_val).sum().item()
             val_total += labels_val.size(0)
-            val_loss.append(loss)
+            val_losses.append(val_loss)
         val_correct.append(val_correct)
         val_acc = val_correct / val_total
         print(f"Validation [{epoch+1}], val_loss : {val_loss}, val_correct : {val_correct}, Total {val_total}, Accuracy : {val_acc}")
@@ -202,10 +203,12 @@ with torch.no_grad():
     for input_ids, labels in test_dataloader:
         input_ids, labels = input_ids.to(device), labels.to(device).unsqueeze(1).float()
         output = model(input_ids)
-        _, predicted = torch.sigmoid(outputs)
-        all_preds.append(predicted.cpu().numpy())
+        predicted = torch.sigmoid(output) > 0.5
+        
+        all_preds.append(output.cpu().numpy())
         all_labels.append(labels.cpu().numpy)
-        correct += (predicted == labels.bool()).sum().items()
+        
+        #correct += (predicted == labels.bool()).sum().items()
         total += labels.size(0)
     accuracy = correct / total
     print(f"Accuracy test {accuracy:.4f}")
