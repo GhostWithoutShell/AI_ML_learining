@@ -1,9 +1,10 @@
 import pandas as pd
 import torch
-#import torchtext
-#from torchtext.data.utils import get_tokenizer
-#from torchtext.vocab import build_vocab_from_iterator
+import torchtext
+from torchtext.data.utils import get_tokenizer
+from torchtext.vocab import build_vocab_from_iterator
 from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.model_selection import train_test_split
 import seaborn as sns
 import numpy as np
 import re
@@ -11,6 +12,8 @@ from torch.utils.data import Dataset, DataLoader
 import torch.nn as nn
 import matplotlib.pyplot as plt
 import math
+import json
+import re
 
 
 class SimpleAttention(nn.Module):
@@ -48,25 +51,164 @@ class TransformerClass(nn.Module):
         self.emb = nn.Embedding(vocab_size, embeding_dim)
         self.attention = SimpleAttention(hidden_size)
         self.norm = nn.LayerNorm(hidden_size//2)
+        self.drop = nn.Dropout(0.25)
         self.lin = nn.Linear(hidden_size//2, 1)
     def forward(self, x):
         x = self.emb(x)
         x = self.attention(x)
         x = self.norm(x)
+        x = self.drop(x)
         x = self.lin(x)
         return x
         
-## tests
-def test_attention():
-    batch_size, seq_len, emb_dim = 2, 4, 8  # Маленькие размеры для дебага
-    x = torch.randn(batch_size, seq_len, emb_dim)
+
+def labelFix(dt):
+    if dt == 'positive':
+        return 1
+    else:
+        return 0
     
-    attention = SimpleAttention(emb_dim)  # Какой параметр должен быть?
+def pad_and_encode(data, index_pad):
+    tokens = tokenizer(data)
+    indexes = [vocab[token] for token in tokens]
+    if len(indexes) < 256:
+        padding_length = 256 - len(indexes)
+        indexes += [index_pad] * padding_length
+    elif len(indexes) > 256:
+        indexes = indexes[0:256]
+    return indexes
+
+#vocab creating pipline
+tokenizer = get_tokenizer("basic_english")
+data = pd.read_csv('D:\MyFiles\Datasets\IMDB\IMDB Dataset.csv')
+data.columns = ['review', 'label']
+data['label'] = data['label'].apply(labelFix)
+
+def removeHtmlTags(string):
+    s2 = re.sub(r"<.*?>", "", string)
+    return s2
+
+data['review'] = data['review'].apply(removeHtmlTags)
+
+def gen_tokenizer(data, tokenizer):
+    for text in data:
+        yield tokenizer(text)
+
+gen = gen_tokenizer(data['review'], tokenizer=tokenizer)
+vocab = build_vocab_from_iterator(gen, specials=['<unk>', '<pad>'], max_tokens=10000)
+vocab.set_default_index(vocab["<unk>"])
+data["input_ids"] = data["review"].apply(pad_and_encode, index_pad=vocab["<pad>"])
+stoi = vocab.get_stoi()
+with open("vocab.json", "w", encoding = "utf-8") as f:
+    json.dump(stoi, f, ensure_ascii=False, indent=2)
+print("Default index:", vocab.get_default_index())
+print("Index of <pad>:", vocab["<pad>"])
+print("Index test :", vocab["13dfsdafsf"])
+
+
+#dataset object
+class LabelsIdsDataset(Dataset):
+    def __init__(self, input_id_list, label_list):
+        self.inputs = input_id_list
+        self.labels = label_list
+    def __len__(self):
+        return len(self.inputs)
+    def __getitem__(self, index):
+        input_tensor = torch.tensor(self.inputs[index], dtype=torch.long)
+        labels_tensor = torch.tensor(self.labels[index], dtype=torch.float)
+        return input_tensor, labels_tensor
+
+#split data
+
+train_, test_ = train_test_split(data, test_size=0.3, random_state=45)
+train_, valid_ = train_test_split(train_, test_size=0.2, random_state=32)
+
+# prepare data for train 
+
+train_ = LabelsIdsDataset(train_["input_ids"].tolist(), train_["label"].tolist())
+test_ = LabelsIdsDataset(test_["input_ids"].tolist(), test_["label"].tolist())
+valid_ = LabelsIdsDataset(valid_["input_ids"].tolist(), valid_["label"].tolist())
+
+train_dataloader = DataLoader(train_, batch_size=32, shuffle=True)
+test_dataloader = DataLoader(test_, batch_size=32, shuffle=False)
+valid_dataloader = DataLoader(valid_, batch_size=32, shuffle=True)
+
+#check shapes of tokens
+
+for batch in train_dataloader:
+    x, y = batch
+    print("Train batch shapes:", x.shape, y.shape)
+    break
+for batch in test_dataloader:
+    x, y = batch
+    print("Test batch shapes:", x.shape, y.shape)
+    break
+for batch in valid_dataloader:
+    x, y = batch
+    print("Test batch shapes:", x.shape, y.shape)
+    break
+
+#setup training
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = TransformerClass(len(vocab), 128, 256).to(device)
+loss_func = torch.nn.BCEWithLogitsLoss()
+learning_rate = 1e-3
+optim = torch.optim.Adam(model.parameters(), lr = learning_rate)
+num_epochs = 10
+losses = []
+corrects = []
+valid_result = []
+val_loss, val_correct, val_total = 0.0, 0, 0
+for epoch in range(num_epochs):
+    for inputs, labels in train_dataloader:
+        input = inputs.to(device)
+        labels = labels.to(device).unsqueeze(1).float()
+        outputs = model(inputs)
+        loss = loss_func(outputs, labels)
+        if loss >= 0.6:
+            optim.lr = optim.lr + 0.0001
+        loss.backward()
+        optim.step()
+        optim.zero_grad()
+        losses.append(loss.item())
+    print(f'epoch {epoch}, loss : {loss.item()}')
+    model.eval()
+    #validation loop
     
-    try:
-        output = attention(x)
-        print(f"Success! Output shape: {output.shape}")
-    except Exception as e:
-        print(f"Error: {e}")
-        # Анализируй ошибку!
-test_attention()
+    with torch.no_grad():
+        for inputs_val, labels_val in valid_dataloader:
+            inputs_val = inputs_val.to(device)
+            labels_val = labels_val.to(device).unsqueeze(1).float()
+            output_val = model(inputs_val)
+            loss_val = loss_func(output_val, labels_val)
+            val_loss = loss_val
+            _, predicted = torch.sigmoid(output_val, 0.8)
+            val_correct += (predicted == labels_val).sum().item()
+            val_total += labels_val.size(0)
+            val_loss.append(loss)
+        val_correct.append(val_correct)
+        val_acc = val_correct / val_total
+        print(f"Validation [{epoch+1}], val_loss : {val_loss}, val_correct : {val_correct}, Total {val_total}, Accuracy : {val_acc}")
+
+model.eval()
+
+correct = 0 
+total = 0
+all_preds = []
+all_labels = []
+
+with torch.no_grad():
+    for input_ids, labels in test_dataloader:
+        input_ids, labels = input_ids.to(device), labels.to(device).unsqueeze(1).float()
+        output = model(input_ids)
+        _, predicted = torch.sigmoid(outputs)
+        all_preds.append(predicted.cpu().numpy())
+        all_labels.append(labels.cpu().numpy)
+        correct += (predicted == labels.bool()).sum().items()
+        total += labels.size(0)
+    accuracy = correct / total
+    print(f"Accuracy test {accuracy:.4f}")
+
+
+
