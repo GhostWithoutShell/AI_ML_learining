@@ -171,6 +171,7 @@ val_corrects = []
 val_loss, val_correct, val_total = 0.0, 0, 0
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optim, 'min', patience=3)
 for epoch in range(num_epochs):
+    
     for inputs, labels in train_dataloader:
         input = inputs.to(device)
         labels = labels.to(device).unsqueeze(1).float()
@@ -184,7 +185,7 @@ for epoch in range(num_epochs):
     
     model.eval()
     #validation loop
-    
+    val_correct, val_total, val_loss = 0, 0, 0
     with torch.no_grad():
         for inputs_val, labels_val in valid_dataloader:
             inputs_val = inputs_val.to(device)
@@ -216,9 +217,9 @@ with torch.no_grad():
         predicted = torch.sigmoid(output) > 0.5
         
         all_preds.append(output.cpu().numpy())
-        all_labels.append(labels.cpu().numpy)
+        all_labels.append(labels.cpu().numpy())
         
-        correct += (predicted == labels.bool()).sum().items()
+        correct += (predicted == labels.bool()).sum().item()
         total += labels.size(0)
     accuracy = correct / total
     print(f"Accuracy test {accuracy:.4f}")
