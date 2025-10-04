@@ -133,6 +133,13 @@ train_dataloader = DataLoader(train_, batch_size=32, shuffle=True)
 test_dataloader = DataLoader(test_, batch_size=32, shuffle=False)
 valid_dataloader = DataLoader(valid_, batch_size=32, shuffle=True)
 
+
+# Быстрый тест без полного обучения
+#for i, (inputs, labels) in enumerate(train_dataloader):
+#    if i > 2:  # Только 3 батча для проверки
+#        break
+#    # твой код здесь
+
 #check shapes of tokens
 
 for batch in train_dataloader:
@@ -160,6 +167,7 @@ losses = []
 val_losses = []
 corrects = []
 valid_result = []
+val_corrects = []
 val_loss, val_correct, val_total = 0.0, 0, 0
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optim, 'min', patience=3)
 for epoch in range(num_epochs):
@@ -173,7 +181,7 @@ for epoch in range(num_epochs):
         optim.zero_grad()
         losses.append(loss.item())
     print(f'epoch {epoch}, loss : {loss.item()}')
-    scheduler.step()
+    
     model.eval()
     #validation loop
     
@@ -184,14 +192,16 @@ for epoch in range(num_epochs):
             output_val = model(inputs_val)
             loss_val = loss_func(output_val, labels_val)
             val_loss = loss_val
-            _, predicted = torch.sigmoid(output_val)
+            predicted = torch.sigmoid(output_val) > 0.5
             val_correct += (predicted == labels_val).sum().item()
             val_total += labels_val.size(0)
             val_losses.append(val_loss)
-        val_correct.append(val_correct)
+        val_corrects.append(val_correct)
         val_acc = val_correct / val_total
         print(f"Validation [{epoch+1}], val_loss : {val_loss}, val_correct : {val_correct}, Total {val_total}, Accuracy : {val_acc}")
+    scheduler.step(val_loss)
 
+    
 model.eval()
 
 correct = 0 
@@ -208,7 +218,7 @@ with torch.no_grad():
         all_preds.append(output.cpu().numpy())
         all_labels.append(labels.cpu().numpy)
         
-        #correct += (predicted == labels.bool()).sum().items()
+        correct += (predicted == labels.bool()).sum().items()
         total += labels.size(0)
     accuracy = correct / total
     print(f"Accuracy test {accuracy:.4f}")
