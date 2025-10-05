@@ -17,45 +17,58 @@ import re
 
 
 class SimpleAttention(nn.Module):
-    def __init__(self, size_kernel):
+    def __init__(self, size_kernel, pad_index):
         super().__init__()
         self.size = size_kernel
+        self.pad_index = pad_index
         self.key = nn.Linear(size_kernel, int(size_kernel/2))
         self.value = nn.Linear(size_kernel, int(size_kernel/2))
         self.query = nn.Linear(size_kernel, int(size_kernel/2))
-    def forward(self, x):
+    def forward(self, x, input_ids):
         x_k = self.key(x)
         x_v = self.value(x)
         x_q = self.query(x)
 
-
-        print(f"Shape v :{x_v.shape}")
-        print(f"Shape q :{x_q.shape}")
-        print(f"Shape k :{x_k.shape}")
-
+        pad_mask = (input_ids != self.pad_index)
+        #print(f"Shape v :{x_v.shape}")
+        #print(f"Shape q :{x_q.shape}")
+        #print(f"Shape k :{x_k.shape}")
+        mask_cols = pad_mask.unsqueeze(1)
+        mask_rows = pad_mask.unsqueeze(-1)
         transpose_k = torch.transpose(x_k, -2, -1)
         
+        #combined_mask = torch.logical_and(mask_rows, mask_cols)
+        #print(combined_mask)
         attention_score = torch.matmul(x_q, transpose_k)
-        print(f"Transpose {transpose_k.shape}")
+        
+        #print(f"Transpose {transpose_k.shape}")
+        
         scaled_scores = attention_score/math.sqrt(self.size)
-        print(f"Scaled scores {scaled_scores}, shape {scaled_scores.shape}")
+        scaled_scores = scaled_scores.masked_fill(~mask_rows, -float('inf'))
+        #masked_scores = torch.where(mask_cols, scaled_scores, -float('inf'))
+        #scaled_scores = torch.clamp(masked_scores, min=-1e9)
+        #print(f"Scaled scores {scaled_scores}, shape {scaled_scores.shape}")
         att_weight = torch.softmax(scaled_scores, dim=1)
-        print(f"Att weight {att_weight}, shape {att_weight.shape}")
+        if torch.any(torch.isnan(att_weight)):
+            print("NaN в attention weights!")
+        #print(f"Att weight {att_weight}, shape {att_weight.shape}")
         result_mat = torch.matmul(att_weight, x_v)
         return torch.mean(result_mat, dim=1)
 
 
 class TransformerClass(nn.Module):
-    def __init__(self, vocab_size, embeding_dim, hidden_size):
+    def __init__(self, vocab_size, embeding_dim, hidden_size, pad_index):
         super().__init__()
         self.emb = nn.Embedding(vocab_size, embeding_dim)
-        self.attention = SimpleAttention(hidden_size)
-        self.norm = nn.LayerNorm(hidden_size//2)
+
+        self.attention = SimpleAttention(embeding_dim, pad_index)
+        self.norm = nn.LayerNorm(embeding_dim // 2)
         self.drop = nn.Dropout(0.25)
-        self.lin = nn.Linear(hidden_size//2, 1)
+        self.lin = nn.Linear(embeding_dim//2, 1)
     def forward(self, x):
+        self.input_ids = x
         x = self.emb(x)
-        x = self.attention(x)
+        x = self.attention(x, self.input_ids)
         x = self.norm(x)
         x = self.drop(x)
         x = self.lin(x)
@@ -156,13 +169,13 @@ for batch in valid_dataloader:
     break
 
 #setup training
-
+print(vocab["<pad>"])
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = TransformerClass(len(vocab), 128, 256).to(device)
+model = TransformerClass(len(vocab), 128, 256, vocab["<pad>"]).to(device)
 loss_func = torch.nn.BCEWithLogitsLoss()
-learning_rate = 1e-3
+learning_rate = 1e-4
 optim = torch.optim.Adam(model.parameters(), lr = learning_rate)
-num_epochs = 10
+num_epochs = 15
 losses = []
 val_losses = []
 corrects = []
@@ -173,7 +186,7 @@ scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optim, 'min', patience=3)
 for epoch in range(num_epochs):
     
     for inputs, labels in train_dataloader:
-        input = inputs.to(device)
+        inputs = inputs.to(device)
         labels = labels.to(device).unsqueeze(1).float()
         outputs = model(inputs)
         loss = loss_func(outputs, labels)
@@ -201,6 +214,7 @@ for epoch in range(num_epochs):
         val_acc = val_correct / val_total
         print(f"Validation [{epoch+1}], val_loss : {val_loss}, val_correct : {val_correct}, Total {val_total}, Accuracy : {val_acc}")
     scheduler.step(val_loss)
+    #print(f"Learining rate {scheduler.lr}")
 
     
 model.eval()
@@ -209,7 +223,7 @@ correct = 0
 total = 0
 all_preds = []
 all_labels = []
-
+accuracy = 0
 with torch.no_grad():
     for input_ids, labels in test_dataloader:
         input_ids, labels = input_ids.to(device), labels.to(device).unsqueeze(1).float()
@@ -223,6 +237,8 @@ with torch.no_grad():
         total += labels.size(0)
     accuracy = correct / total
     print(f"Accuracy test {accuracy:.4f}")
+
+torch.save(model.state_dict(), f"transformer{accuracy:.2f}.pth")
 
 
 
