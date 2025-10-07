@@ -30,31 +30,54 @@ class MultiheadAttention(nn.Module):
         x_v = self.value(x)
         x_q = self.query(x)
         print(self.size // self.num_heads)
-        x_q_head = x_q.view(32, 256, self.num_heads, self.size // self.num_heads)
-        x_k_head = x_k.view(32, 256, self.num_heads, self.size // self.num_heads)
-        x_v_head = x_v.view(32, 256, self.num_heads, self.size // self.num_heads)
-        print("XQ head", x_q_head.shape)
-        print("XK head", x_k_head.shape)
-        print("XV head", x_v_head.shape)
-        print("XQ head", x_q_head)
+        x_q_head = x_q.view(x_q.shape[0], x_q.shape[1], self.num_heads, self.size // self.num_heads)
+        x_k_head = x_k.view(x_k.shape[0], x_k.shape[1], self.num_heads, self.size // self.num_heads)
+        x_v_head = x_v.view(x_v.shape[0], x_v.shape[1], self.num_heads, self.size // self.num_heads)
         pad_mask = (input_ids != self.pad_index)
         mask_rows = pad_mask.unsqueeze(-1)
-        transpose_k = torch.transpose(x_k, -2, -1)
-        
-        
-        attention_score = torch.matmul(x_q, transpose_k)
-        
+        results = []
+        for i in range(self.num_heads):
+            x_q_head_val = x_q_head[:,:,i,:]
+            x_k_head_val = x_k_head[:,:,i,:]
+            x_v_head_val = x_v_head[:,:,i,:]
 
-        
-        scaled_scores = attention_score/math.sqrt(self.size)
-        scaled_scores = scaled_scores.masked_fill(~mask_rows, -float('inf'))
+            transpose_k_head = torch.transpose(x_k_head_val, -2, -1)
+            att_score = torch.matmul(x_q_head_val, transpose_k_head)
 
-        att_weight = torch.softmax(scaled_scores, dim=1)
-        if torch.any(torch.isnan(att_weight)):
-            print("NaN в attention weights!")
-        #print(f"Att weight {att_weight}, shape {att_weight.shape}")
-        result_mat = torch.matmul(att_weight, x_v)
-        return torch.mean(result_mat, dim=1)
+            score = att_score/math.sqrt(self.size // self.num_heads)
+            score = score.masked_fill(~mask_rows, -float('inf'))
+            weight = torch.softmax(score, dim=1)
+            result_mat = torch.matmul(weight, x_v_head_val)
+            results.append(result_mat)
+            
+        result = torch.cat(results, dim = -1)
+        return torch.mean(result, dim =1)
+
+
+
+
+        #print("XQ head", x_q_head.shape)
+        #print("XK head", x_k_head.shape)
+        #print("XV head", x_v_head.shape)
+        #print("XQ head", x_q_head)
+        
+        #mask_rows = pad_mask.unsqueeze(-1)
+        #transpose_k = torch.transpose(x_k, -2, -1)
+        #
+        #
+        #attention_score = torch.matmul(x_q, transpose_k)
+        #
+#
+        #
+        #scaled_scores = attention_score/math.sqrt(self.size)
+        #scaled_scores = scaled_scores.masked_fill(~mask_rows, -float('inf'))
+#
+        #att_weight = torch.softmax(scaled_scores, dim=1)
+        #if torch.any(torch.isnan(att_weight)):
+        #    print("NaN в attention weights!")
+        ##print(f"Att weight {att_weight}, shape {att_weight.shape}")
+        #result_mat = torch.matmul(att_weight, x_v)
+        #return torch.mean(result_mat, dim=1)
 
 
 class TransformerClass(nn.Module):
