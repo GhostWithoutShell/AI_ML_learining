@@ -46,7 +46,7 @@ class MultiheadAttention(nn.Module):
 
             score = att_score/math.sqrt(self.size // self.num_heads)
             score = score.masked_fill(~mask_rows, -float('inf'))
-            weight = torch.softmax(score, dim=1)
+            weight = torch.softmax(score, dim=-1)
             result_mat = torch.matmul(weight, x_v_head_val)
             results.append(result_mat)
             
@@ -86,9 +86,9 @@ class TransformerClass(nn.Module):
         print("EmbDim :", embeding_dim)
         self.emb = nn.Embedding(vocab_size, embeding_dim)
         self.attention = MultiheadAttention(embeding_dim, pad_index, 8)
-        self.norm = nn.LayerNorm(embeding_dim // 2)
+        self.norm = nn.LayerNorm(embeding_dim)
         self.drop = nn.Dropout(0.25)
-        self.lin = nn.Linear(embeding_dim//2, 1)
+        self.lin = nn.Linear(embeding_dim, 1)
     def forward(self, x):
         self.input_ids = x
         x = self.emb(x)
