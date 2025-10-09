@@ -25,16 +25,18 @@ class MultiheadAttention(nn.Module):
         self.key = nn.Linear(size_kernel, int(size_kernel))
         self.value = nn.Linear(size_kernel, int(size_kernel))
         self.query = nn.Linear(size_kernel, int(size_kernel))
+        self.norm = nn.LayerNorm(size_kernel)
+        self.drop = nn.Dropout(0.2)
+        self.projection = nn.Linear(size_kernel*self.num_heads, int(size_kernel))
     def forward(self, x, input_ids):
         x_k = self.key(x)
         x_v = self.value(x)
         x_q = self.query(x)
-        print(self.size // self.num_heads)
         x_q_head = x_q.view(x_q.shape[0], x_q.shape[1], self.num_heads, self.size // self.num_heads)
         x_k_head = x_k.view(x_k.shape[0], x_k.shape[1], self.num_heads, self.size // self.num_heads)
         x_v_head = x_v.view(x_v.shape[0], x_v.shape[1], self.num_heads, self.size // self.num_heads)
         pad_mask = (input_ids != self.pad_index)
-        mask_rows = pad_mask.unsqueeze(-1)
+        mask_rows = pad_mask.unsqueeze(-2)
         results = []
         for i in range(self.num_heads):
             x_q_head_val = x_q_head[:,:,i,:]
@@ -48,10 +50,14 @@ class MultiheadAttention(nn.Module):
             score = score.masked_fill(~mask_rows, -float('inf'))
             weight = torch.softmax(score, dim=-1)
             result_mat = torch.matmul(weight, x_v_head_val)
+        
             results.append(result_mat)
             
         result = torch.cat(results, dim = -1)
-        return torch.mean(result, dim =1)
+        x = self.norm(result)
+        x = self.drop(x)
+        x = self.projection(x)
+        return torch.mean(x, dim =1)
 
 
 
@@ -199,7 +205,7 @@ model = TransformerClass(len(vocab), 128, vocab["<pad>"]).to(device)
 loss_func = torch.nn.BCEWithLogitsLoss()
 learning_rate = 1e-4
 optim = torch.optim.Adam(model.parameters(), lr = learning_rate)
-num_epochs = 1
+num_epochs = 10
 losses = []
 val_losses = []
 corrects = []
