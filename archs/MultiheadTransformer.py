@@ -27,7 +27,7 @@ class MultiheadAttention(nn.Module):
         self.query = nn.Linear(size_kernel, int(size_kernel))
         self.norm = nn.LayerNorm(size_kernel)
         self.drop = nn.Dropout(0.2)
-        self.projection = nn.Linear(128, size_kernel)
+        self.projection = nn.Linear(size_kernel, size_kernel)
     def forward(self, x, input_ids):
         residual_x = x
         x_k = self.key(x)
@@ -48,18 +48,22 @@ class MultiheadAttention(nn.Module):
             att_score = torch.matmul(x_q_head_val, transpose_k_head)
 
             score = att_score/math.sqrt(self.size // self.num_heads)
-            score = score.masked_fill(~mask_rows, -float('inf'))
+            #score = score.masked_fill(~mask_rows, -float('inf'))
             weight = torch.softmax(score, dim=-1)
             result_mat = torch.matmul(weight, x_v_head_val)
+            #print(f"Голова {i}: result_mat.shape = {result_mat.shape}")
         
             results.append(result_mat)
         result = torch.cat(results, dim = -1)
-        x = self.projection(result)
-        print(f"Норма residual: {torch.norm(residual_x).item():.4f}")
-        print(f"Норма attention: {torch.norm(result).item():.4f}")
-        print(f"Соотношение: {torch.norm(result).item() / torch.norm(residual_x).item():.4f}")
+        #print(f"result.shape после конкатенации: {result.shape}")
+        #x = self.projection(result)
+        #print(f"Норма residual: {torch.norm(residual_x).item():.4f}")
+        #print(f"Норма attention: {torch.norm(result).item():.4f}")
+        #print(f"Соотношение: {torch.norm(result).item() / torch.norm(residual_x).item():.4f}")
         # residual  connection
-        x = x + residual_x
+        result = self.projection(result)
+        x = result + residual_x
+
         x = self.norm(x)
         x = self.drop(x)
                 
