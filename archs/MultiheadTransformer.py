@@ -27,8 +27,9 @@ class MultiheadAttention(nn.Module):
         self.query = nn.Linear(size_kernel, int(size_kernel))
         self.norm = nn.LayerNorm(size_kernel)
         self.drop = nn.Dropout(0.2)
-        self.projection = nn.Linear(size_kernel*self.num_heads, int(size_kernel))
+        self.projection = nn.Linear(128, size_kernel)
     def forward(self, x, input_ids):
+        residual_x = x
         x_k = self.key(x)
         x_v = self.value(x)
         x_q = self.query(x)
@@ -52,38 +53,20 @@ class MultiheadAttention(nn.Module):
             result_mat = torch.matmul(weight, x_v_head_val)
         
             results.append(result_mat)
-            
         result = torch.cat(results, dim = -1)
-        x = self.norm(result)
+        x = self.projection(result)
+        print(f"Норма residual: {torch.norm(residual_x).item():.4f}")
+        print(f"Норма attention: {torch.norm(result).item():.4f}")
+        print(f"Соотношение: {torch.norm(result).item() / torch.norm(residual_x).item():.4f}")
+        # residual  connection
+        x = x + residual_x
+        x = self.norm(x)
         x = self.drop(x)
-        x = self.projection(x)
-        return torch.mean(x, dim =1)
-
-
-
-
-        #print("XQ head", x_q_head.shape)
-        #print("XK head", x_k_head.shape)
-        #print("XV head", x_v_head.shape)
-        #print("XQ head", x_q_head)
-        
-        #mask_rows = pad_mask.unsqueeze(-1)
-        #transpose_k = torch.transpose(x_k, -2, -1)
-        #
-        #
-        #attention_score = torch.matmul(x_q, transpose_k)
-        #
-#
-        #
-        #scaled_scores = attention_score/math.sqrt(self.size)
-        #scaled_scores = scaled_scores.masked_fill(~mask_rows, -float('inf'))
-#
-        #att_weight = torch.softmax(scaled_scores, dim=1)
-        #if torch.any(torch.isnan(att_weight)):
-        #    print("NaN в attention weights!")
-        ##print(f"Att weight {att_weight}, shape {att_weight.shape}")
-        #result_mat = torch.matmul(att_weight, x_v)
-        #return torch.mean(result_mat, dim=1)
+                
+        #print("After projection", x.shape)
+        mean = torch.mean(x, dim =1)
+        #print("result after mean", mean)
+        return mean
 
 
 class TransformerClass(nn.Module):
@@ -91,13 +74,18 @@ class TransformerClass(nn.Module):
         super().__init__()
         print("EmbDim :", embeding_dim)
         self.emb = nn.Embedding(vocab_size, embeding_dim)
+        self.pos_emb = nn.Embedding(256, embeding_dim)
         self.attention = MultiheadAttention(embeding_dim, pad_index, 8)
         self.norm = nn.LayerNorm(embeding_dim)
         self.drop = nn.Dropout(0.25)
         self.lin = nn.Linear(embeding_dim, 1)
     def forward(self, x):
         self.input_ids = x
-        x = self.emb(x)
+        word_emb = self.emb(x)
+        positions = torch.arange(0, x.size(1)).to(x.device)
+        pos_x = self.pos_emb(positions)
+
+        x = word_emb + pos_x
         x = self.attention(x, self.input_ids)
         x = self.norm(x)
         x = self.drop(x)
