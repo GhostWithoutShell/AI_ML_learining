@@ -37,8 +37,8 @@ class MultiheadAttention(nn.Module):
         x_k_head = x_k.view(x_k.shape[0], x_k.shape[1], self.num_heads, self.size // self.num_heads)
         x_v_head = x_v.view(x_v.shape[0], x_v.shape[1], self.num_heads, self.size // self.num_heads)
         pad_mask = (input_ids != self.pad_index)
-        mask_rows = pad_mask.unsqueeze(-2)
         results = []
+        mask_rows = pad_mask.unsqueeze(-2)
         for i in range(self.num_heads):
             x_q_head_val = x_q_head[:,:,i,:]
             x_k_head_val = x_k_head[:,:,i,:]
@@ -48,29 +48,36 @@ class MultiheadAttention(nn.Module):
             att_score = torch.matmul(x_q_head_val, transpose_k_head)
 
             score = att_score/math.sqrt(self.size // self.num_heads)
-            #score = score.masked_fill(~mask_rows, -float('inf'))
+            score = score.masked_fill(~mask_rows, -float('inf'))
             weight = torch.softmax(score, dim=-1)
             result_mat = torch.matmul(weight, x_v_head_val)
             #print(f"Голова {i}: result_mat.shape = {result_mat.shape}")
         
             results.append(result_mat)
         result = torch.cat(results, dim = -1)
-        #print(f"result.shape после конкатенации: {result.shape}")
-        #x = self.projection(result)
-        #print(f"Норма residual: {torch.norm(residual_x).item():.4f}")
-        #print(f"Норма attention: {torch.norm(result).item():.4f}")
-        #print(f"Соотношение: {torch.norm(result).item() / torch.norm(residual_x).item():.4f}")
         # residual  connection
         result = self.projection(result)
         x = result + residual_x
-
+        
         x = self.norm(x)
         x = self.drop(x)
-                
+        pad_mask_ = (input_ids != self.pad_index).unsqueeze(-1).float()
+        x_masked = x * pad_mask_
+        sum_emb = torch.sum(x_masked, dim = 1)
+        num_tokens = torch.sum(pad_mask_, dim = 1)
+
+        num_tokens = torch.clamp(num_tokens, min = 1)
+        mean_ = sum_emb/num_tokens
+        #sum_emb = torch.sum(x_masked, dim=1)
+        #num_tok = torch.sum(pad_mask, dim=1)
+        #mean = sum_emb/num_tok       
         #print("After projection", x.shape)
-        mean = torch.mean(x, dim =1)
+        #mean = torch.mean(x, dim =1)
         #print("result after mean", mean)
-        return mean
+        #print(f"sum_emb.shape: {sum_emb.shape}")
+        #print(f"num_tokens.shape: {num_tokens.shape}")  
+        #print(f"mean_.shape: {mean_.shape}")
+        return mean_
 
 
 class TransformerClass(nn.Module):
@@ -158,14 +165,26 @@ class LabelsIdsDataset(Dataset):
 train_, test_ = train_test_split(data, test_size=0.3, random_state=45)
 train_, valid_ = train_test_split(train_, test_size=0.2, random_state=32)
 
+test_ = test_.reset_index(drop = True)
 # prepare data for train 
 
 train_ = LabelsIdsDataset(train_["input_ids"].tolist(), train_["label"].tolist())
-test_ = LabelsIdsDataset(test_["input_ids"].tolist(), test_["label"].tolist())
+test_dataloader = LabelsIdsDataset(test_["input_ids"].tolist(), test_["label"].tolist())
 valid_ = LabelsIdsDataset(valid_["input_ids"].tolist(), valid_["label"].tolist())
-
+#prepare data for debug on small inputs len
+val_filter_first, val_filter_second = 100, 200
+input_50 = (test_['review'].apply(len) < val_filter_first and test_['review'].apply(len) > val_filter_second)
+values_50 = test_[input_50]
+print("Len test loader", len(values_50))
+#input_100_50 = test_[(test_['input_ids'].apply(len) < val_filter_first & test_['input_ids'].apply(len) > val_filter_second)]
+#print(values_50)
+#labels_50 = list(filter(lambda x: len(x) <= val_filter, test_["input_ids"].tolist()))
+test_dataloader_50 = LabelsIdsDataset(values_50["input_ids"].tolist(), values_50["label"].tolist())
+#test_dataloader_100 = LabelsIdsDataset(test_["input_ids"].tolist(), test_["label"].tolist())
+#test_dataloader_160 = LabelsIdsDataset(test_["input_ids"].tolist(), test_["label"].tolist())
 train_dataloader = DataLoader(train_, batch_size=32, shuffle=True)
-test_dataloader = DataLoader(test_, batch_size=32, shuffle=False)
+test_dataloader = DataLoader(test_dataloader, batch_size=32, shuffle=False)
+test50_dataloader = DataLoader(test_dataloader_50, batch_size=32, shuffle=False)
 valid_dataloader = DataLoader(valid_, batch_size=32, shuffle=True)
 
 
@@ -194,8 +213,9 @@ for batch in valid_dataloader:
 print(vocab["<pad>"])
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = TransformerClass(len(vocab), 128, vocab["<pad>"]).to(device)
+print("Вес pos_emb[0,0] в начале:", model.pos_emb.weight[0, 0].item())
 loss_func = torch.nn.BCEWithLogitsLoss()
-learning_rate = 1e-4
+learning_rate = 3e-4
 optim = torch.optim.Adam(model.parameters(), lr = learning_rate)
 num_epochs = 10
 losses = []
@@ -205,62 +225,144 @@ valid_result = []
 val_corrects = []
 val_loss, val_correct, val_total = 0.0, 0, 0
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optim, 'min', patience=3)
-for epoch in range(num_epochs):
-    
-    for inputs, labels in train_dataloader:
-        inputs = inputs.to(device)
-        labels = labels.to(device).unsqueeze(1).float()
-        outputs = model(inputs)
-        loss = loss_func(outputs, labels)
-        loss.backward()
-        optim.step()
-        optim.zero_grad()
-        losses.append(loss.item())
-    print(f'epoch {epoch}, loss : {loss.item()}')
-    
-    model.eval()
-    #validation loop
-    val_correct, val_total, val_loss = 0, 0, 0
-    with torch.no_grad():
-        for inputs_val, labels_val in valid_dataloader:
-            inputs_val = inputs_val.to(device)
-            labels_val = labels_val.to(device).unsqueeze(1).float()
-            output_val = model(inputs_val)
-            loss_val = loss_func(output_val, labels_val)
-            val_loss = loss_val
-            predicted = torch.sigmoid(output_val) > 0.5
-            val_correct += (predicted == labels_val).sum().item()
-            val_total += labels_val.size(0)
-            val_losses.append(val_loss)
-        val_corrects.append(val_correct)
-        val_acc = val_correct / val_total
-        print(f"Validation [{epoch+1}], val_loss : {val_loss}, val_correct : {val_correct}, Total {val_total}, Accuracy : {val_acc}")
-    scheduler.step(val_loss)
-    #print(f"Learining rate {scheduler.lr}")
+runTrain = False
+if(runTrain):
+    for epoch in range(num_epochs):
+
+        for inputs, labels in train_dataloader:
+            inputs = inputs.to(device)
+            labels = labels.to(device).unsqueeze(1).float()
+            outputs = model(inputs)
+            loss = loss_func(outputs, labels)
+            loss.backward()
+            optim.step()
+            optim.zero_grad()
+            losses.append(loss.item())
+        print(f'epoch {epoch}, loss : {loss.item()}')
+
+        model.eval()
+        #validation loop
+        val_correct, val_total, val_loss = 0, 0, 0
+        with torch.no_grad():
+            for inputs_val, labels_val in valid_dataloader:
+                inputs_val = inputs_val.to(device)
+                labels_val = labels_val.to(device).unsqueeze(1).float()
+                output_val = model(inputs_val)
+                loss_val = loss_func(output_val, labels_val)
+                val_loss = loss_val
+                predicted = torch.sigmoid(output_val) > 0.5
+                val_correct += (predicted == labels_val).sum().item()
+                val_total += labels_val.size(0)
+                val_losses.append(val_loss)
+            val_corrects.append(val_correct)
+            val_acc = val_correct / val_total
+            print(f"Validation [{epoch+1}], val_loss : {val_loss}, val_correct : {val_correct}, Total {val_total}, Accuracy : {val_acc}")
+        scheduler.step(val_loss)
+        #print(f"Learining rate {scheduler.lr}")
 
     
-model.eval()
+if(runTrain == False):
+    model.load_state_dict(torch.load("transformer0.84.pth"))
+    model.eval()
+
 
 correct = 0 
 total = 0
 all_preds = []
+all_pred_ids = []
 all_labels = []
+incorrect_vals = []
+obj_for_debug = []
 accuracy = 0
 with torch.no_grad():
-    for input_ids, labels in test_dataloader:
+    for batch_id, (input_ids, labels) in enumerate(test_dataloader):
         input_ids, labels = input_ids.to(device), labels.to(device).unsqueeze(1).float()
         output = model(input_ids)
         predicted = torch.sigmoid(output) > 0.5
+        #obj_for_debug['predicted'].append(predicted)
         
+
         all_preds.append(output.cpu().numpy())
+        all_pred_ids.append(output)
         all_labels.append(labels.cpu().numpy())
-        
+        example_start_idx = batch_id * test_dataloader.batch_size
+        labels_bool = labels.bool()
+        #for i in range(len(predicted)):
+            
+        for i in range(len(predicted)):
+            globax_idx = example_start_idx + i
+            
+            #obj_for_debug['indexes'].append(globax_idx)
+            if predicted[i] != labels_bool[i]:
+                text = test_["review"][globax_idx]
+                #obj_for_debug['texts'].append(text)
+                error_info = {
+                    "text" : text,
+                    "predicted" : predicted[i],
+                    "globalIdx" : globax_idx,
+                    "true" : labels_bool[i],
+                    "textLen" : len(text)
+                }
+                obj_for_debug.append(error_info)
+                #obj_for_debug['errors'].append((example_start_idx + i, predicted[i], labels_bool[i]))
+
+        #obj_for_debug['true_lab'].append((predicted == labels.bool()).item())
         correct += (predicted == labels.bool()).sum().item()
         total += labels.size(0)
     accuracy = correct / total
     print(f"Accuracy test {accuracy:.4f}")
+print(len(obj_for_debug))
+correct = 0
+total = 0
+accuracy = 0
+with torch.no_grad():
+    for batch_id, (input_ids, labels) in enumerate(test50_dataloader):
+        input_ids, labels = input_ids.to(device), labels.to(device).unsqueeze(1).float()
+        output = model(input_ids)
+        predicted = torch.sigmoid(output) > 0.5
+        #obj_for_debug['predicted'].append(predicted)
+        
 
-torch.save(model.state_dict(), f"transformer{accuracy:.2f}.pth")
+        all_preds.append(output.cpu().numpy())
+        all_pred_ids.append(output)
+        all_labels.append(labels.cpu().numpy())
+        example_start_idx = batch_id * test50_dataloader.batch_size
+        labels_bool = labels.bool()
+        #for i in range(len(predicted)):
+            
+        for i in range(len(predicted)):
+            globax_idx = example_start_idx + i
+            
+            #obj_for_debug['indexes'].append(globax_idx)
+            if predicted[i] != labels_bool[i]:
+                text = test_["review"][globax_idx]
+                #obj_for_debug['texts'].append(text)
+                error_info = {
+                    "text" : text,
+                    "predicted" : predicted[i],
+                    "globalIdx" : globax_idx,
+                    "true" : labels_bool[i],
+                    "textLen" : len(text)
+                }
+                obj_for_debug.append(error_info)
+                #obj_for_debug['errors'].append((example_start_idx + i, predicted[i], labels_bool[i]))
 
+        #obj_for_debug['true_lab'].append((predicted == labels.bool()).item())
+        correct += (predicted == labels.bool()).sum().item()
+        total += labels.size(0)
+    accuracy = correct / total
+    print(f"Accuracy test 50 len {accuracy:.4f}")
+print(len(obj_for_debug))
 
+#from matplotlib import pyplot as plt
+#
+#plt.hist([x['textLen'] for x in obj_for_debug], bins=75)
+#plt.xlim([0, 500])
+#plt.xlabel('Text Length')
+#plt.ylabel('Frequency')
+#plt.title('Distribution of Text Lengths in Misclassified Samples')
+#plt.show()
 
+print(obj_for_debug[0]['text'])
+if(runTrain):
+    torch.save(model.state_dict(), f"transformer{accuracy:.2f}.pth")
