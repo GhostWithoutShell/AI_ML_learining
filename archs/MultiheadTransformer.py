@@ -68,15 +68,6 @@ class MultiheadAttention(nn.Module):
 
         num_tokens = torch.clamp(num_tokens, min = 1)
         mean_ = sum_emb/num_tokens
-        #sum_emb = torch.sum(x_masked, dim=1)
-        #num_tok = torch.sum(pad_mask, dim=1)
-        #mean = sum_emb/num_tok       
-        #print("After projection", x.shape)
-        #mean = torch.mean(x, dim =1)
-        #print("result after mean", mean)
-        #print(f"sum_emb.shape: {sum_emb.shape}")
-        #print(f"num_tokens.shape: {num_tokens.shape}")  
-        #print(f"mean_.shape: {mean_.shape}")
         return mean_
 
 
@@ -104,51 +95,6 @@ class TransformerClass(nn.Module):
         return x
         
 
-def labelFix(dt):
-    if dt == 'positive':
-        return 1
-    else:
-        return 0
-    
-def pad_and_encode(data, index_pad):
-    tokens = tokenizer(data)
-    indexes = [vocab[token] for token in tokens]
-    if len(indexes) < 256:
-        padding_length = 256 - len(indexes)
-        indexes += [index_pad] * padding_length
-    elif len(indexes) > 256:
-        indexes = indexes[0:256]
-    return indexes
-
-#vocab creating pipline
-tokenizer = get_tokenizer("basic_english")
-data = pd.read_csv('D:\MyFiles\Datasets\IMDB\IMDB Dataset.csv')
-data.columns = ['review', 'label']
-data['label'] = data['label'].apply(labelFix)
-
-def removeHtmlTags(string):
-    s2 = re.sub(r"<.*?>", "", string)
-    return s2
-
-data['review'] = data['review'].apply(removeHtmlTags)
-
-def gen_tokenizer(data, tokenizer):
-    for text in data:
-        yield tokenizer(text)
-
-gen = gen_tokenizer(data['review'], tokenizer=tokenizer)
-vocab = build_vocab_from_iterator(gen, specials=['<unk>', '<pad>'], max_tokens=10000)
-vocab.set_default_index(vocab["<unk>"])
-data["input_ids"] = data["review"].apply(pad_and_encode, index_pad=vocab["<pad>"])
-stoi = vocab.get_stoi()
-with open("vocab.json", "w", encoding = "utf-8") as f:
-    json.dump(stoi, f, ensure_ascii=False, indent=2)
-print("Default index:", vocab.get_default_index())
-print("Index of <pad>:", vocab["<pad>"])
-print("Index test :", vocab["13dfsdafsf"])
-
-
-#dataset object
 class LabelsIdsDataset(Dataset):
     def __init__(self, input_id_list, label_list):
         self.inputs = input_id_list
@@ -160,31 +106,131 @@ class LabelsIdsDataset(Dataset):
         labels_tensor = torch.tensor(self.labels[index], dtype=torch.float)
         return input_tensor, labels_tensor
 
-#split data
+
+
+
+def prepareAmazonDataset():
+    tokenizer = get_tokenizer("basic_english")
+    def remove_emojis(text):
+        return text.encode('ascii', 'ignore').decode('ascii')
+
+    def clean_text(text):
+        text = re.sub(r'[^а-яА-Яa-zA-Z0-9\s.,!?:;\'"()\[\]{}@#$%^&*+=\-/\\]', '', text)
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text
+    def generate_token(dt, tokenizer):
+        for text in dt:
+            yield tokenizer(text)
+    def removeHtmlTags(string):
+        s2 = re.sub(r"<.*?>", "", string)
+        return s2
+    def pad_and_encode(data):
+        tokens = tokenizer(data)
+        indexes = [vocab[token] for token in tokens]
+        if len(indexes) < 256:
+            padding_length = 256 - len(indexes)
+            indexes += [index_pad] * padding_length
+        elif len(indexes) > 256:
+            indexes = indexes[0:256]
+        return indexes
+    # Load and preprocess train data
+    df_text = pd.read_csv('D:\\MyFiles\\Datasets\\AmazonReview\\amazon_review_polarity_csv\\train.csv')
+    df_text.columns = ["label", "Subject", "Body"]
+    df_text_splited = df_text[:90000].copy().reset_index(drop=True)
+    df_text_splited = df_text_splited.dropna()
+    label_variations = df_text_splited['label'].unique()
+    df_text_splited['label'] = df_text_splited["label"].map(lambda x: 0 if x == 1 else 1)
+    df_text_splited['Subject'] = df_text_splited['Subject'].fillna('')
+    df_text_splited['Body'] = df_text_splited['Body'].fillna('')
+    df_text_splited["Subject"] = df_text_splited["Subject"].apply(remove_emojis)
+    df_text_splited["Body"] = df_text_splited["Body"].apply(remove_emojis)
+    df_text_splited["Subject"] = df_text_splited["Subject"].apply(removeHtmlTags)
+    df_text_splited["Body"] = df_text_splited["Body"].apply(removeHtmlTags)
+    df_text_splited["Subject"] = df_text_splited["Subject"].apply(clean_text)
+    df_text_splited["Body"] = df_text_splited["Body"].apply(clean_text)
+    gen = generate_token(df_text_splited["Subject"]+df_text_splited["Body"], tokenizer)
+    vocab = build_vocab_from_iterator(gen, specials=["<unk>", "<pad>"], max_tokens=15000)
+    vocab.set_default_index(vocab["<unk>"])
+    index_pad = vocab["<pad>"]
+    df_text_splited["ConcatString"] = df_text_splited["Subject"] + " " + df_text_splited["Body"]
+    df_text_splited["input_ids"] = df_text_splited["ConcatString"].apply(pad_and_encode)
+    df_text_splited = df_text_splited.reset_index(drop=True)
+    return df_text_splited, vocab
+
+def prepareDataForImdb():
+
+
+    tokenizer = get_tokenizer("basic_english")
+    def labelFix(dt):
+        if dt == 'positive':
+            return 1
+        else:
+            return 0
+    def gen_tokenizer(data, tokenizer):
+        for text in data:
+            yield tokenizer(text)
+    def removeHtmlTags(string):
+        s2 = re.sub(r"<.*?>", "", string)
+        return s2
+    def pad_and_encode(data, index_pad):
+        tokens = tokenizer(data)
+        indexes = [vocab[token] for token in tokens]
+        if len(indexes) < 256:
+            padding_length = 256 - len(indexes)
+            indexes += [index_pad] * padding_length
+        elif len(indexes) > 256:
+            indexes = indexes[0:256]
+        return indexes
+    
+    data = pd.read_csv('D:\MyFiles\Datasets\IMDB\IMDB Dataset.csv')
+    data.columns = ['review', 'label']
+    data['label'] = data['label'].apply(labelFix)
+    data['review'] = data['review'].apply(removeHtmlTags)
+    def removeHtmlTags(string):
+        s2 = re.sub(r"<.*?>", "", string)
+        return s2
+    
+    data['review'] = data['review'].apply(removeHtmlTags)
+    
+    def gen_tokenizer(data, tokenizer):
+        for text in data:
+            yield tokenizer(text)
+    
+    gen = gen_tokenizer(data['review'], tokenizer=tokenizer)
+    vocab = build_vocab_from_iterator(gen, specials=['<unk>', '<pad>'], max_tokens=10000)
+    vocab.set_default_index(vocab["<unk>"])
+    data["input_ids"] = data["review"].apply(pad_and_encode, index_pad=vocab["<pad>"])
+    stoi = vocab.get_stoi()
+    with open("vocab.json", "w", encoding = "utf-8") as f:
+        json.dump(stoi, f, ensure_ascii=False, indent=2)
+    gen = gen_tokenizer(data['review'], tokenizer=tokenizer)
+    vocab = build_vocab_from_iterator(gen, specials=['<unk>', '<pad>'], max_tokens=10000)
+    vocab.set_default_index(vocab["<unk>"])
+    data["input_ids"] = data["review"].apply(pad_and_encode, index_pad=vocab["<pad>"])
+    stoi = vocab.get_stoi()
+    with open("vocab.json", "w", encoding = "utf-8") as f:
+        json.dump(stoi, f, ensure_ascii=False, indent=2)
+    print("Default index:", vocab.get_default_index())
+    print("Index of <pad>:", vocab["<pad>"])
+    print("Index test :", vocab["13dfsdafsf"])
+    return data, vocab
+
+data, vocab = prepareAmazonDataset()
 
 train_, test_ = train_test_split(data, test_size=0.3, random_state=45)
 train_, valid_ = train_test_split(train_, test_size=0.2, random_state=32)
 
 test_ = test_.reset_index(drop = True)
-# prepare data for train 
+
 
 train_ = LabelsIdsDataset(train_["input_ids"].tolist(), train_["label"].tolist())
 test_dataloader = LabelsIdsDataset(test_["input_ids"].tolist(), test_["label"].tolist())
 valid_ = LabelsIdsDataset(valid_["input_ids"].tolist(), valid_["label"].tolist())
-#prepare data for debug on small inputs len
-val_filter_first, val_filter_second = 100, 200
-input_50 = (test_['review'].apply(len) < val_filter_first and test_['review'].apply(len) > val_filter_second)
-values_50 = test_[input_50]
-print("Len test loader", len(values_50))
-#input_100_50 = test_[(test_['input_ids'].apply(len) < val_filter_first & test_['input_ids'].apply(len) > val_filter_second)]
-#print(values_50)
-#labels_50 = list(filter(lambda x: len(x) <= val_filter, test_["input_ids"].tolist()))
-test_dataloader_50 = LabelsIdsDataset(values_50["input_ids"].tolist(), values_50["label"].tolist())
-#test_dataloader_100 = LabelsIdsDataset(test_["input_ids"].tolist(), test_["label"].tolist())
-#test_dataloader_160 = LabelsIdsDataset(test_["input_ids"].tolist(), test_["label"].tolist())
+
+val_filter_first, val_filter_second = 300, 600 
+
 train_dataloader = DataLoader(train_, batch_size=32, shuffle=True)
 test_dataloader = DataLoader(test_dataloader, batch_size=32, shuffle=False)
-test50_dataloader = DataLoader(test_dataloader_50, batch_size=32, shuffle=False)
 valid_dataloader = DataLoader(valid_, batch_size=32, shuffle=True)
 
 
@@ -210,12 +256,11 @@ for batch in valid_dataloader:
     break
 
 #setup training
-print(vocab["<pad>"])
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = TransformerClass(len(vocab), 128, vocab["<pad>"]).to(device)
 print("Вес pos_emb[0,0] в начале:", model.pos_emb.weight[0, 0].item())
 loss_func = torch.nn.BCEWithLogitsLoss()
-learning_rate = 3e-4
+learning_rate = 2e-4
 optim = torch.optim.Adam(model.parameters(), lr = learning_rate)
 num_epochs = 10
 losses = []
@@ -225,7 +270,7 @@ valid_result = []
 val_corrects = []
 val_loss, val_correct, val_total = 0.0, 0, 0
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optim, 'min', patience=3)
-runTrain = False
+runTrain = True
 if(runTrain):
     for epoch in range(num_epochs):
 
@@ -274,85 +319,87 @@ all_labels = []
 incorrect_vals = []
 obj_for_debug = []
 accuracy = 0
-with torch.no_grad():
-    for batch_id, (input_ids, labels) in enumerate(test_dataloader):
-        input_ids, labels = input_ids.to(device), labels.to(device).unsqueeze(1).float()
-        output = model(input_ids)
-        predicted = torch.sigmoid(output) > 0.5
-        #obj_for_debug['predicted'].append(predicted)
-        
+if runTrain:
+    with torch.no_grad():
+        for batch_id, (input_ids, labels) in enumerate(test_dataloader):
+            input_ids, labels = input_ids.to(device), labels.to(device).unsqueeze(1).float()
+            output = model(input_ids)
+            predicted = torch.sigmoid(output) > 0.5
+            #obj_for_debug['predicted'].append(predicted)
 
-        all_preds.append(output.cpu().numpy())
-        all_pred_ids.append(output)
-        all_labels.append(labels.cpu().numpy())
-        example_start_idx = batch_id * test_dataloader.batch_size
-        labels_bool = labels.bool()
-        #for i in range(len(predicted)):
-            
-        for i in range(len(predicted)):
-            globax_idx = example_start_idx + i
-            
-            #obj_for_debug['indexes'].append(globax_idx)
-            if predicted[i] != labels_bool[i]:
-                text = test_["review"][globax_idx]
-                #obj_for_debug['texts'].append(text)
-                error_info = {
-                    "text" : text,
-                    "predicted" : predicted[i],
-                    "globalIdx" : globax_idx,
-                    "true" : labels_bool[i],
-                    "textLen" : len(text)
-                }
-                obj_for_debug.append(error_info)
-                #obj_for_debug['errors'].append((example_start_idx + i, predicted[i], labels_bool[i]))
 
-        #obj_for_debug['true_lab'].append((predicted == labels.bool()).item())
-        correct += (predicted == labels.bool()).sum().item()
-        total += labels.size(0)
-    accuracy = correct / total
-    print(f"Accuracy test {accuracy:.4f}")
+            all_preds.append(output.cpu().numpy())
+            all_pred_ids.append(output)
+            all_labels.append(labels.cpu().numpy())
+            example_start_idx = batch_id * test_dataloader.batch_size
+            labels_bool = labels.bool()
+            #for i in range(len(predicted)):
+
+            for i in range(len(predicted)):
+                globax_idx = example_start_idx + i
+
+                #obj_for_debug['indexes'].append(globax_idx)
+                if predicted[i] != labels_bool[i]:
+                    text = test_["review"][globax_idx]
+                    #obj_for_debug['texts'].append(text)
+                    error_info = {
+                        "text" : text,
+                        "predicted" : predicted[i],
+                        "globalIdx" : globax_idx,
+                        "true" : labels_bool[i],
+                        "textLen" : len(text)
+                    }
+                    obj_for_debug.append(error_info)
+                    #obj_for_debug['errors'].append((example_start_idx + i, predicted[i], labels_bool[i]))
+
+            #obj_for_debug['true_lab'].append((predicted == labels.bool()).item())
+            correct += (predicted == labels.bool()).sum().item()
+            total += labels.size(0)
+        accuracy = correct / total
+        print(f"Accuracy test {accuracy:.4f}")
 print(len(obj_for_debug))
 correct = 0
 total = 0
 accuracy = 0
-with torch.no_grad():
-    for batch_id, (input_ids, labels) in enumerate(test50_dataloader):
-        input_ids, labels = input_ids.to(device), labels.to(device).unsqueeze(1).float()
-        output = model(input_ids)
-        predicted = torch.sigmoid(output) > 0.5
-        #obj_for_debug['predicted'].append(predicted)
-        
+if runTrain == False:
+    with torch.no_grad():
+        for batch_id, (input_ids, labels) in enumerate(test50_dataloader):
+            input_ids, labels = input_ids.to(device), labels.to(device).unsqueeze(1).float()
+            output = model(input_ids)
+            predicted = torch.sigmoid(output) > 0.5
+            #obj_for_debug['predicted'].append(predicted)
 
-        all_preds.append(output.cpu().numpy())
-        all_pred_ids.append(output)
-        all_labels.append(labels.cpu().numpy())
-        example_start_idx = batch_id * test50_dataloader.batch_size
-        labels_bool = labels.bool()
-        #for i in range(len(predicted)):
-            
-        for i in range(len(predicted)):
-            globax_idx = example_start_idx + i
-            
-            #obj_for_debug['indexes'].append(globax_idx)
-            if predicted[i] != labels_bool[i]:
-                text = test_["review"][globax_idx]
-                #obj_for_debug['texts'].append(text)
-                error_info = {
-                    "text" : text,
-                    "predicted" : predicted[i],
-                    "globalIdx" : globax_idx,
-                    "true" : labels_bool[i],
-                    "textLen" : len(text)
-                }
-                obj_for_debug.append(error_info)
-                #obj_for_debug['errors'].append((example_start_idx + i, predicted[i], labels_bool[i]))
 
-        #obj_for_debug['true_lab'].append((predicted == labels.bool()).item())
-        correct += (predicted == labels.bool()).sum().item()
-        total += labels.size(0)
-    accuracy = correct / total
-    print(f"Accuracy test 50 len {accuracy:.4f}")
-print(len(obj_for_debug))
+            all_preds.append(output.cpu().numpy())
+            all_pred_ids.append(output)
+            all_labels.append(labels.cpu().numpy())
+            example_start_idx = batch_id * test50_dataloader.batch_size
+            labels_bool = labels.bool()
+            #for i in range(len(predicted)):
+
+            for i in range(len(predicted)):
+                globax_idx = example_start_idx + i
+
+                #obj_for_debug['indexes'].append(globax_idx)
+                if predicted[i] != labels_bool[i]:
+                    text = test_["review"][globax_idx]
+                    #obj_for_debug['texts'].append(text)
+                    error_info = {
+                        "text" : text,
+                        "predicted" : predicted[i],
+                        "globalIdx" : globax_idx,
+                        "true" : labels_bool[i],
+                        "textLen" : len(text)
+                    }
+                    obj_for_debug.append(error_info)
+                    #obj_for_debug['errors'].append((example_start_idx + i, predicted[i], labels_bool[i]))
+
+            #obj_for_debug['true_lab'].append((predicted == labels.bool()).item())
+            correct += (predicted == labels.bool()).sum().item()
+            total += labels.size(0)
+        accuracy = correct / total
+        print(f"Accuracy test 50 len {accuracy:.4f}")
+    print(len(obj_for_debug))
 
 #from matplotlib import pyplot as plt
 #
@@ -363,6 +410,23 @@ print(len(obj_for_debug))
 #plt.title('Distribution of Text Lengths in Misclassified Samples')
 #plt.show()
 
-print(obj_for_debug[0]['text'])
+#for item in range(30):
+#    print(obj_for_debug[item]['text'])
+#    print("--------")
+for error in obj_for_debug[:10]:
+    text = error['text']
+    # Подсчитай спец символы
+    symbol_counts = {
+        'quotes': text.count('"') + text.count("'"),
+        'exclamation': text.count('!'),
+        'question': text.count('?'),
+        'parentheses': text.count('(') + text.count(')'),
+        'ellipsis': text.count('...')
+    }
+    print(f"Символы в ошибке: {symbol_counts}")
+    print(f"Текст: {text[:100]}...\n")
+#digit_token = [token for token in vocab.get_itos() if token == "(" or token == ")" or token == "\""]
+#print("Count digit", len(digit_token))
+#print("Examples" , digit_token[:3])
 if(runTrain):
     torch.save(model.state_dict(), f"transformer{accuracy:.2f}.pth")
