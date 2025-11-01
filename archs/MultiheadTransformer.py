@@ -82,6 +82,7 @@ class TransformerClass(nn.Module):
         self.drop = nn.Dropout(0.25)
         self.lin = nn.Linear(embeding_dim, 1)
     def forward(self, x):
+        residual_x = x
         self.input_ids = x
         word_emb = self.emb(x)
         positions = torch.arange(0, x.size(1)).to(x.device)
@@ -92,6 +93,7 @@ class TransformerClass(nn.Module):
         x = self.norm(x)
         x = self.drop(x)
         x = self.lin(x)
+        
         return x
         
 
@@ -149,11 +151,11 @@ def prepareAmazonDataset():
     df_text_splited["Subject"] = df_text_splited["Subject"].apply(clean_text)
     df_text_splited["Body"] = df_text_splited["Body"].apply(clean_text)
     gen = generate_token(df_text_splited["Subject"]+df_text_splited["Body"], tokenizer)
-    vocab = build_vocab_from_iterator(gen, specials=["<unk>", "<pad>"], max_tokens=15000)
+    vocab = build_vocab_from_iterator(gen, specials=["<unk>", "<pad>"], max_tokens=17000)
     vocab.set_default_index(vocab["<unk>"])
     index_pad = vocab["<pad>"]
-    df_text_splited["ConcatString"] = df_text_splited["Subject"] + " " + df_text_splited["Body"]
-    df_text_splited["input_ids"] = df_text_splited["ConcatString"].apply(pad_and_encode)
+    df_text_splited["review"] = df_text_splited["Subject"] + " " + df_text_splited["Body"]
+    df_text_splited["input_ids"] = df_text_splited["review"].apply(pad_and_encode)
     df_text_splited = df_text_splited.reset_index(drop=True)
     return df_text_splited, vocab
 
@@ -181,11 +183,15 @@ def prepareDataForImdb():
         elif len(indexes) > 256:
             indexes = indexes[0:256]
         return indexes
-    
+    def clean_text(text):
+        text = re.sub(r'[^а-яА-Яa-zA-Z0-9\s.,!?:;\'"()\[\]{}@#$%^&*+=\-/\\]', '', text)
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text
     data = pd.read_csv('D:\MyFiles\Datasets\IMDB\IMDB Dataset.csv')
     data.columns = ['review', 'label']
     data['label'] = data['label'].apply(labelFix)
     data['review'] = data['review'].apply(removeHtmlTags)
+    data['review'] = data['review'].apply(clean_text)
     def removeHtmlTags(string):
         s2 = re.sub(r"<.*?>", "", string)
         return s2
@@ -197,15 +203,17 @@ def prepareDataForImdb():
             yield tokenizer(text)
     
     gen = gen_tokenizer(data['review'], tokenizer=tokenizer)
-    vocab = build_vocab_from_iterator(gen, specials=['<unk>', '<pad>'], max_tokens=10000)
+    #max_tokens = (10000 if dataset == "IMDB" else 15000)
+    max_tokens = 17000
+    vocab = build_vocab_from_iterator(gen, specials=['<unk>', '<pad>'], max_tokens=max_tokens)
     vocab.set_default_index(vocab["<unk>"])
     data["input_ids"] = data["review"].apply(pad_and_encode, index_pad=vocab["<pad>"])
     stoi = vocab.get_stoi()
     with open("vocab.json", "w", encoding = "utf-8") as f:
         json.dump(stoi, f, ensure_ascii=False, indent=2)
     gen = gen_tokenizer(data['review'], tokenizer=tokenizer)
-    vocab = build_vocab_from_iterator(gen, specials=['<unk>', '<pad>'], max_tokens=10000)
-    vocab.set_default_index(vocab["<unk>"])
+    #vocab = build_vocab_from_iterator(gen, specials=['<unk>', '<pad>'], max_tokens=15000)
+    #vocab.set_default_index(vocab["<unk>"])
     data["input_ids"] = data["review"].apply(pad_and_encode, index_pad=vocab["<pad>"])
     stoi = vocab.get_stoi()
     with open("vocab.json", "w", encoding = "utf-8") as f:
@@ -214,8 +222,14 @@ def prepareDataForImdb():
     print("Index of <pad>:", vocab["<pad>"])
     print("Index test :", vocab["13dfsdafsf"])
     return data, vocab
+runTrain = False
+dataset = "IMDB" #"IMDB"  #"Amazon"
 
-data, vocab = prepareAmazonDataset()
+data, vocab = (prepareDataForImdb() if dataset == "IMDB" else prepareAmazonDataset())
+count_input_unk = data[data["input_ids"].apply(lambda x: vocab["<unk>"] in x)].shape[0]
+print("Count of samples with <unk> token:", count_input_unk)
+print("Count vocab tok percentage :" ,count_input_unk / data.shape[0] * 100)
+
 
 train_, test_ = train_test_split(data, test_size=0.3, random_state=45)
 train_, valid_ = train_test_split(train_, test_size=0.2, random_state=32)
@@ -234,13 +248,6 @@ test_dataloader = DataLoader(test_dataloader, batch_size=32, shuffle=False)
 valid_dataloader = DataLoader(valid_, batch_size=32, shuffle=True)
 
 
-# Быстрый тест без полного обучения
-#for i, (inputs, labels) in enumerate(train_dataloader):
-#    if i > 2:  # Только 3 батча для проверки
-#        break
-#    # твой код здесь
-
-#check shapes of tokens
 
 for batch in train_dataloader:
     x, y = batch
@@ -258,7 +265,6 @@ for batch in valid_dataloader:
 #setup training
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = TransformerClass(len(vocab), 128, vocab["<pad>"]).to(device)
-print("Вес pos_emb[0,0] в начале:", model.pos_emb.weight[0, 0].item())
 loss_func = torch.nn.BCEWithLogitsLoss()
 learning_rate = 2e-4
 optim = torch.optim.Adam(model.parameters(), lr = learning_rate)
@@ -270,7 +276,7 @@ valid_result = []
 val_corrects = []
 val_loss, val_correct, val_total = 0.0, 0, 0
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optim, 'min', patience=3)
-runTrain = True
+
 if(runTrain):
     for epoch in range(num_epochs):
 
@@ -303,14 +309,119 @@ if(runTrain):
             val_acc = val_correct / val_total
             print(f"Validation [{epoch+1}], val_loss : {val_loss}, val_correct : {val_correct}, Total {val_total}, Accuracy : {val_acc}")
         scheduler.step(val_loss)
-        #print(f"Learining rate {scheduler.lr}")
 
     
 if(runTrain == False):
-    model.load_state_dict(torch.load("transformer0.84.pth"))
+    if dataset == "IMDB":
+        model.load_state_dict(torch.load("multihead_transformer_IMDB_0.84.pth"))
+    else:
+        model.load_state_dict(torch.load("multihead_transformer_Amazon_0.87.pth"))
     model.eval()
 
+fineTuneFlag = True
+if(fineTuneFlag and runTrain == False):
+    print("Fine-tuning model...")
+    model.emb.weight.requires_grad = False
+    model.pos_emb.weight.requires_grad = False
+    model.attention.key.weight.requires_grad = False
+    model.attention.value.weight.requires_grad = False
+    model.attention.query.weight.requires_grad = False
+    #model.attention.norm.weight.requires_grad = False
+    data, vocab = prepareAmazonDataset()
+    train_, test_ = train_test_split(data, test_size=0.3, random_state=45)
+    train_, valid_ = train_test_split(train_, test_size=0.2, random_state=32)
+    test_ = test_.reset_index(drop = True)
+    train_dataset = LabelsIdsDataset(train_["input_ids"].tolist(), train_["label"].tolist())
+    valid_dataset = LabelsIdsDataset(valid_["input_ids"].tolist(), valid_["label"].tolist())
+    test_dataset = LabelsIdsDataset(test_["input_ids"].tolist(), test_["label"].tolist())
+    train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+    valid_dataloader = DataLoader(valid_dataset, batch_size=32, shuffle=True)
+    test_dataloader = DataLoader(test_dataset, batch_size=32, shuffle=False)
+    learning_rate = 1e-4
+    optim = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr = learning_rate)
+    correct = 0 
+    total = 0
+    all_preds = []
+    accuracy = 0
+    all_pred_ids = []
+    all_labels = []
+    incorrect_vals = []
+    obj_for_debug = []
+    obj_for_right_pred = []
+    num_epochs = 3
+    for epoch in range(num_epochs):
+        for inputs, labels in train_dataloader:
+            inputs = inputs.to(device)
+            labels = labels.to(device).unsqueeze(1).float()
+            outputs = model(inputs)
+            loss = loss_func(outputs, labels)
+            loss.backward()
+            optim.step()
+            optim.zero_grad()
+            losses.append(loss.item())
+        print(f'epoch {epoch}, loss : {loss.item()}')
 
+        model.eval()
+        #validation loop
+        val_correct, val_total, val_loss = 0, 0, 0
+        with torch.no_grad():
+            for inputs_val, labels_val in valid_dataloader:
+                inputs_val = inputs_val.to(device)
+                labels_val = labels_val.to(device).unsqueeze(1).float()
+                output_val = model(inputs_val)
+                loss_val = loss_func(output_val, labels_val)
+                val_loss = loss_val
+                predicted = torch.sigmoid(output_val) > 0.5
+                val_correct += (predicted == labels_val).sum().item()
+                val_total += labels_val.size(0)
+                val_losses.append(val_loss)
+            val_corrects.append(val_correct)
+            val_acc = val_correct / val_total
+            print(f"Validation [{epoch+1}], val_loss : {val_loss}, val_correct : {val_correct}, Total {val_total}, Accuracy : {val_acc}")
+        #scheduler.step(val_loss)
+    #with torch.no_grad():
+    for batch_id, (input_ids, labels) in enumerate(test_dataloader):
+        input_ids, labels = input_ids.to(device), labels.to(device).unsqueeze(1).float()
+        output = model(input_ids)
+        predicted = torch.sigmoid(output) > 0.5
+
+        all_preds.append(output.detach().cpu().numpy())
+        all_pred_ids.append(output)
+        all_labels.append(labels.detach().cpu().numpy())
+        example_start_idx = batch_id * test_dataloader.batch_size
+        labels_bool = labels.bool()
+        #for i in range(len(predicted)):
+        for i in range(len(predicted)):
+            globax_idx = example_start_idx + i
+            #obj_for_debug['indexes'].append(globax_idx)
+            if predicted[i] != labels_bool[i]:
+                text_Res = None
+                text = test_["review"][globax_idx]
+                if predicted[i] == True and labels_bool[i] == False :
+                  text_Res = "False Positive"
+                else :
+                  text_Res = "False Negative"
+                error_info = {
+                    "text" : text,
+                    "color_metric" : text_Res,
+                    "globalIdx" : globax_idx,
+                    "textLen" : len(text),
+                    "input_ids" : input_ids[i].cpu().numpy().tolist()
+                }
+                obj_for_debug.append(error_info)
+            else:
+                correct_info = {
+                    "globalIdx" : globax_idx,
+                    "input_ids" : input_ids[i].cpu().numpy().tolist()
+                }
+                obj_for_right_pred.append(correct_info)#
+        correct += (predicted == labels.bool()).sum().item()
+        total += labels.size(0)
+        accuracy = correct / total
+    print(f"Accuracy test {accuracy:.4f}")
+    print("Errors" , [error["text"] for error in obj_for_debug[0:5]])
+
+    model.save_state_dict(model.state_dict(), f"multihead_transformer_finetuned_Amazon_{accuracy:.2f}.pth")
 correct = 0 
 total = 0
 all_preds = []
@@ -318,115 +429,189 @@ all_pred_ids = []
 all_labels = []
 incorrect_vals = []
 obj_for_debug = []
+obj_for_right_pred = []
 accuracy = 0
-if runTrain:
-    with torch.no_grad():
-        for batch_id, (input_ids, labels) in enumerate(test_dataloader):
-            input_ids, labels = input_ids.to(device), labels.to(device).unsqueeze(1).float()
-            output = model(input_ids)
-            predicted = torch.sigmoid(output) > 0.5
-            #obj_for_debug['predicted'].append(predicted)
+#if runTrain:
+with torch.no_grad():
+    for batch_id, (input_ids, labels) in enumerate(test_dataloader):
+        input_ids, labels = input_ids.to(device), labels.to(device).unsqueeze(1).float()
+        output = model(input_ids)
+        predicted = torch.sigmoid(output) > 0.5
+        
+        all_preds.append(output.cpu().numpy())
+        all_pred_ids.append(output)
+        all_labels.append(labels.cpu().numpy())
+        example_start_idx = batch_id * test_dataloader.batch_size
+        labels_bool = labels.bool()
+        #for i in range(len(predicted)):
+        for i in range(len(predicted)):
+            globax_idx = example_start_idx + i
+            #obj_for_debug['indexes'].append(globax_idx)
+            if predicted[i] != labels_bool[i]:
+                text_Res = None
+                text = test_["review"][globax_idx]
+                if predicted[i] == True and labels_bool[i] == False :
+                  text_Res = "False Positive"
+                else :
+                  text_Res = "False Negative"
+                error_info = {
+                    "text" : text,
+                    "color_metric" : text_Res,
+                    "globalIdx" : globax_idx,
+                    "textLen" : len(text),
+                    "input_ids" : input_ids[i].cpu().numpy().tolist()
+                }
+                obj_for_debug.append(error_info)
+            else:
+                correct_info = {
+                    "globalIdx" : globax_idx,
+                    "input_ids" : input_ids[i].cpu().numpy().tolist()
+                }
+                obj_for_right_pred.append(correct_info)
 
-
-            all_preds.append(output.cpu().numpy())
-            all_pred_ids.append(output)
-            all_labels.append(labels.cpu().numpy())
-            example_start_idx = batch_id * test_dataloader.batch_size
-            labels_bool = labels.bool()
-            #for i in range(len(predicted)):
-
-            for i in range(len(predicted)):
-                globax_idx = example_start_idx + i
-
-                #obj_for_debug['indexes'].append(globax_idx)
-                if predicted[i] != labels_bool[i]:
-                    text = test_["review"][globax_idx]
-                    #obj_for_debug['texts'].append(text)
-                    error_info = {
-                        "text" : text,
-                        "predicted" : predicted[i],
-                        "globalIdx" : globax_idx,
-                        "true" : labels_bool[i],
-                        "textLen" : len(text)
-                    }
-                    obj_for_debug.append(error_info)
-                    #obj_for_debug['errors'].append((example_start_idx + i, predicted[i], labels_bool[i]))
-
-            #obj_for_debug['true_lab'].append((predicted == labels.bool()).item())
-            correct += (predicted == labels.bool()).sum().item()
-            total += labels.size(0)
+        correct += (predicted == labels.bool()).sum().item()
+        total += labels.size(0)
         accuracy = correct / total
-        print(f"Accuracy test {accuracy:.4f}")
+    print(f"Accuracy test {accuracy:.4f}")
 print(len(obj_for_debug))
+
+## DEBUG
+
+
+
 correct = 0
 total = 0
-accuracy = 0
-if runTrain == False:
-    with torch.no_grad():
-        for batch_id, (input_ids, labels) in enumerate(test50_dataloader):
-            input_ids, labels = input_ids.to(device), labels.to(device).unsqueeze(1).float()
-            output = model(input_ids)
-            predicted = torch.sigmoid(output) > 0.5
-            #obj_for_debug['predicted'].append(predicted)
+accuracy_test = 0
+
+from collections import Counter
+tokens_list = []
+tokens_list_pos = []
+
+def analyze_token_results(token_id, obj_for_debug):
+    fp_count = 0
+    fn_count = 0
+    for i in obj_for_debug:
+        if token_id in i["input_ids"]:
+            if i["color_metric"] == "False Positive":
+                fp_count += 1
+            elif i["color_metric"] == "False Negative":
+                fn_count += 1
+    if fp_count > fn_count:
+        return {"fp_count": fp_count,"fn_count" :fn_count, "dom": "False Positive"}
+    elif fn_count > fp_count:
+        return {"fp_count": fp_count,"fn_count" :fn_count, "dom": "False Negative"}
+    else :
+        return {"fp_count": fp_count,"fn_count" :fn_count, "dom": "Balanced"}
+
+for i in range(2000):
+    tokens = obj_for_debug[i]["input_ids"]
+    fist_token_pad = tokens.index(vocab["<pad>"]) if vocab["<pad>"] in tokens else len(tokens)
+    tokens_without_pad = tokens[0:fist_token_pad]
+    tokens_list.extend(tokens_without_pad)
+
+for i in range(2000):
+    tokens = obj_for_right_pred[i]["input_ids"]
+    fist_token_pad = tokens.index(vocab["<pad>"]) if vocab["<pad>"] in tokens else len(tokens)
+    tokens_without_pad = tokens[0:fist_token_pad]
+    tokens_list_pos.extend(tokens_without_pad)
+frequent_tokens = []
+counter_values = []
+counter = Counter(tokens_list)
+vocab_itos = vocab.get_itos()
+for i in counter.items():
+    if i[1] > 20:
+        text = vocab_itos[i[0]]
+    
+        if re.search(r'[.,!?:;\'"()\[\]{}@#$%^&*+=\-/\\]', text):
+            continue
+        debug_obj = {
+            "token_id" : i[0],
+            "count" : i[1],
+            "token_str" : text
+        }
+        frequent_tokens.append(debug_obj)
+        counter_values.append(i[0])
+
+import tools.vector_checking as vc
+tokens_weight = None
+with torch.no_grad():
+    tokens_weight = model.emb.weight.data[counter_values].cpu().detach().numpy()
+data_for_scatter = []
+data_for_scattter_cos = []
+print(tokens_weight[0][0])
+
+coordinates_evc, coordinates_cos = vc.main(tokens_weight)
+
+result_ngrams = vc.extract_nrgams(tokens_list, n = 3)
+result_ngrams_pos = vc.extract_nrgams(tokens_list_pos, n = 3)
+
+import matplotlib.pyplot as plt
 
 
-            all_preds.append(output.cpu().numpy())
-            all_pred_ids.append(output)
-            all_labels.append(labels.cpu().numpy())
-            example_start_idx = batch_id * test50_dataloader.batch_size
-            labels_bool = labels.bool()
-            #for i in range(len(predicted)):
 
-            for i in range(len(predicted)):
-                globax_idx = example_start_idx + i
+#print("Result bi-grams negative", result_ngrams)
 
-                #obj_for_debug['indexes'].append(globax_idx)
-                if predicted[i] != labels_bool[i]:
-                    text = test_["review"][globax_idx]
-                    #obj_for_debug['texts'].append(text)
-                    error_info = {
-                        "text" : text,
-                        "predicted" : predicted[i],
-                        "globalIdx" : globax_idx,
-                        "true" : labels_bool[i],
-                        "textLen" : len(text)
-                    }
-                    obj_for_debug.append(error_info)
-                    #obj_for_debug['errors'].append((example_start_idx + i, predicted[i], labels_bool[i]))
+print("Vocab", vocab_itos[2]) 
+arr_items_neg = []
+arr_items_pos = []
+def collect_text_from_ngram(ngram, n):
+    arr_temp = []
+    for item in counter_Ngrams.most_common(20):
+        print("Ngram:", item)
+        if n == 2:
+            print("Negative ngram tokens", vocab_itos[item[0][0]], vocab_itos[item[0][1]])
+        elif n == 3:
+            print("Negative ngram tokens", vocab_itos[item[0][0]], vocab_itos[item[0][1]], vocab_itos[item[0][2]])
+        arr_temp.append(item)
+    return arr_temp
+counter_Ngrams = Counter(result_ngrams)
+counter_PosNrgams = Counter(result_ngrams_pos)
+for item in counter_Ngrams.most_common(20):
+    arr_items_neg.append({"ngram_text": vocab_itos[item[0][0]]+vocab_itos[item[0][1]]+vocab_itos[item[0][2]], "count": item[1], "color" : "red"})
+for item in counter_PosNrgams.most_common(20):
+    arr_items_pos.append({"ngram_text": vocab_itos[item[0][0]]+vocab_itos[item[0][1]]+vocab_itos[item[0][2]], "count": item[1], "color" : "green"})
 
-            #obj_for_debug['true_lab'].append((predicted == labels.bool()).item())
-            correct += (predicted == labels.bool()).sum().item()
-            total += labels.size(0)
-        accuracy = correct / total
-        print(f"Accuracy test 50 len {accuracy:.4f}")
-    print(len(obj_for_debug))
 
-#from matplotlib import pyplot as plt
-#
-#plt.hist([x['textLen'] for x in obj_for_debug], bins=75)
-#plt.xlim([0, 500])
-#plt.xlabel('Text Length')
-#plt.ylabel('Frequency')
-#plt.title('Distribution of Text Lengths in Misclassified Samples')
-#plt.show()
+arr_temp = []
+arr_temp.extend(arr_items_neg)
+arr_temp.extend(arr_items_pos)
 
-#for item in range(30):
-#    print(obj_for_debug[item]['text'])
-#    print("--------")
-for error in obj_for_debug[:10]:
-    text = error['text']
-    # Подсчитай спец символы
-    symbol_counts = {
-        'quotes': text.count('"') + text.count("'"),
-        'exclamation': text.count('!'),
-        'question': text.count('?'),
-        'parentheses': text.count('(') + text.count(')'),
-        'ellipsis': text.count('...')
-    }
-    print(f"Символы в ошибке: {symbol_counts}")
-    print(f"Текст: {text[:100]}...\n")
-#digit_token = [token for token in vocab.get_itos() if token == "(" or token == ")" or token == "\""]
-#print("Count digit", len(digit_token))
-#print("Examples" , digit_token[:3])
+# print ngram bar plot
+
+fig, ax = plt.subplots(figsize=(20, 15))
+plt.subplots_adjust(wspace=2, hspace=3)
+
+ax.bar([item["ngram_text"] for item in arr_temp], [item["count"] for item in arr_temp], color=[item["color"] for item in arr_temp], label='Negative Positive N-grams', width=0.6)
+
+plt.show()
+
+tokens_spec = ["<unk>", '.', '<pad>', '\'', ',', '!']
+token_words =['of', 'movie', 'good', 'great', 'like', 'story']
+weights_spec = []
+weights_word = []
+import numpy as np
+from scipy.spatial.distance import cosine
+with torch.no_grad():
+    for i in tokens_spec:
+        weights_spec.append(model.emb.weight[vocab[i]].data.cpu().detach().numpy())
+    for i in token_words:
+        weights_word.append(model.emb.weight[vocab[i]].data.cpu().detach().numpy())
+arr_cos_words = []
+arr_cos_spec = []
+for i in range(len(weights_word)):
+    result = cosine(weights_spec[0], weights_word[i])
+    print("Cosine between <unk> and", token_words[i], ":", result)
+    arr_cos_words.append(cosine(weights_spec[0], weights_word[i]))
+for i in range(1, len(weights_spec)):
+    result = cosine(weights_spec[0], weights_spec[i])
+    print("Cosine between <unk> and", tokens_spec[i], ":", result)
+    arr_cos_spec.append(cosine(weights_spec[0], weights_spec[i]))
+
+print("Special tokens weights:", cosine(weights_spec[0], weights_word[0]))
+print("Special tokens weights:", cosine(weights_spec[0], weights_word[1]))
+
+print("Norm of spec tok", torch.norm(torch.tensor(weights_spec[0])))
+print("Norm of of word", torch.norm(torch.tensor(weights_word[0])))
+
 if(runTrain):
-    torch.save(model.state_dict(), f"transformer{accuracy:.2f}.pth")
+    torch.save(model.state_dict(), f"multihead_transformer_{dataset}_{accuracy:.2f}.pth")
