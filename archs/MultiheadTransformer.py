@@ -16,8 +16,8 @@ import json
 from sklearn.metrics import confusion_matrix
 import spacy
 from scipy.spatial.distance import cosine
-import archs.Earlystopping as es
 
+from Earlystop import EarlyStopping as es
 class PoolingLayer(nn.Module):
     def __init__(self, pad_index):
         super().__init__()
@@ -301,7 +301,7 @@ valid_result = []
 val_corrects = []
 val_loss, val_correct, val_total = 0.0, 0, 0
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optim, 'min', patience=2)
-early_stopping = es.EarlyStopping(patience=5, min_delta=0.0001)
+early_stopping = es(patience=5, min_delta=0.0001)
 
 if(runTrain):
     for epoch in range(num_epochs):
