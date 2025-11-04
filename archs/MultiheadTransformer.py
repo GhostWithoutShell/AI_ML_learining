@@ -16,6 +16,7 @@ import json
 from sklearn.metrics import confusion_matrix
 import spacy
 from scipy.spatial.distance import cosine
+import archs.Earlystopping as es
 
 class PoolingLayer(nn.Module):
     def __init__(self, pad_index):
@@ -77,32 +78,6 @@ class MultiheadAttention(nn.Module):
         x = result + residual_x
         return x
 
-class EarlyStopping:
-    def __init__(self, patience=5, min_delta=0):
-       self.metrics_results = []
-       self.patience = patience
-       self.min_delta = min_delta
-       self.counter = 0
-       self.model_weights = None
-    def get_best_weights(self):
-        return self.model_weights
-    def __call__(self, val_loss, model_weights):
-        if len(self.metrics_results) == 0:
-            self.metrics_results.append(val_loss)
-            self.model_weights = model_weights
-            return False
-        else:
-            if val_loss < (min(self.metrics_results) - self.min_delta):
-                self.metrics_results.append(val_loss)
-                self.counter = 0
-                self.model_weights = model_weights
-                return False
-            else:
-                self.counter += 1
-                if self.counter >= self.patience:
-                    print("Early stopping triggered")
-                    return True
-                return False
 class TransformerClass(nn.Module):
     def __init__(self, vocab_size, embeding_dim, pad_index):
         super().__init__()
@@ -326,7 +301,7 @@ valid_result = []
 val_corrects = []
 val_loss, val_correct, val_total = 0.0, 0, 0
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optim, 'min', patience=2)
-early_stopping = EarlyStopping(patience=5, min_delta=0.0001)
+early_stopping = es.EarlyStopping(patience=5, min_delta=0.0001)
 
 if(runTrain):
     for epoch in range(num_epochs):
