@@ -88,9 +88,10 @@ class TransformerClass(nn.Module):
         self.dropAttention = nn.Dropout(0.2)
         #self.normAttention = nn.LayerNorm(embeding_dim)
         self.attention2 = MultiheadAttention(embeding_dim, pad_index, 4)
+        self.attention3 = MultiheadAttention(embeding_dim, pad_index, 2)
         self.pooling = PoolingLayer(pad_index)
         self.norm = nn.LayerNorm(embeding_dim)
-        self.drop = nn.Dropout(0.25)
+        self.drop = nn.Dropout(0.5)
         self.lin = nn.Linear(embeding_dim, 1)
     def forward(self, x):
         residual_x = x
@@ -106,7 +107,10 @@ class TransformerClass(nn.Module):
         x = self.dropAttention(x)
         #x = self.normAttention(x)
         x = self.attention2(x, self.input_ids)
-        x = x + res_emb_x# + x_res_att
+        x = x + res_emb_x + x_res_att
+        x = self.attention3(x, self.input_ids)
+        x = x + (x_res_att + res_emb_x)
+        x = self.dropAttention(x)
         x = self.pooling(x, self.input_ids, type = 0)
         #x = x + residual_x.float()
         x = self.norm(x)
@@ -137,7 +141,7 @@ def prepareAmazonDataset():
         return text.encode('ascii', 'ignore').decode('ascii')
 
     def clean_text(text):
-        text = re.sub(r'[^а-яА-Яa-zA-Z0-9\s.,!?:;\'"()\[\]{}@#$%^&*+=\-/\\]', '', text)
+        #text = re.sub(r'[^а-яА-Яa-zA-Z0-9\s.,!?:;\'"()\[\]{}@#$%^&*+=\-/\\]', '', text)
         text = re.sub(r'\s+', ' ', text).strip()
         #text = text.replace("it's", "it is")
         #text = text.replace("isn't", "is not")
@@ -201,9 +205,7 @@ def prepareDataForImdb():
             return 1
         else:
             return 0
-    def gen_tokenizer_spacy(data, tokenizer):
-        for text in data:
-            yield tokenizer(text)
+    
     def removeHtmlTags(string):
         s2 = re.sub(r"<.*?>", "", string)
         return s2
@@ -217,7 +219,8 @@ def prepareDataForImdb():
             indexes = indexes[0:256]
         return indexes
     def clean_text(text):
-        text = re.sub(r'[^а-яА-Яa-zA-Z0-9\s.,!?:;\'"()\[\]{}@#$%^&*+=\-/\\]', '', text)
+        # to aggressive cleaning
+        #text = re.sub(r'[^а-яА-Яa-zA-Z0-9\s.,!?:;\'"()\[\]{}@#$%^&*+=\-/\\]', '', text)
         text = re.sub(r'\s+', ' ', text).strip()
         text = text.replace("it's", "it is")
         text = text.replace("isn't", "is not")
@@ -225,6 +228,12 @@ def prepareDataForImdb():
         text = text.replace("don't", "do not")
         text = text.replace("idon't", "i do not")
         text = text.replace("there`s", "there is")
+        text = text.replace("alotof", "a lot of")
+        text = text.replace("thereis", "there is")
+        text = text.replace("filmis", "film is")
+        text = text.replace("he`s", "he is")
+        text = text.replace(".ifyou", "if you")
+        text = text.replace("idonot", "i do not")
         return text
     data = pd.read_csv('D:\MyFiles\Datasets\IMDB\IMDB Dataset.csv')
     data.columns = ['review', 'label']
@@ -241,9 +250,9 @@ def prepareDataForImdb():
         for text in data:
             yield tokenizer(text)
     
-    gen = gen_tokenizer_spacy(data['review'], tokenizer=tokenizer)
+    gen = gen_tokenizer(data['review'], tokenizer=tokenizer)
     #max_tokens = (10000 if dataset == "IMDB" else 15000)
-    max_tokens = 20000
+    max_tokens = 25000
     vocab = build_vocab_from_iterator(gen, specials=['<unk>', '<pad>'], max_tokens=max_tokens)
     vocab.set_default_index(vocab["<unk>"])
     data["input_ids"] = data["review"].apply(pad_and_encode, index_pad=vocab["<pad>"])
@@ -262,50 +271,51 @@ def prepareDataForImdb():
     print("Index test :", vocab["13dfsdafsf"])
     return data, vocab
 runTrain = True
-dataset = "Amazon" #"IMDB"  #"Amazon"
+dataset = "IMDB" #"IMDB"  #"Amazon"
 
 data, vocab = (prepareDataForImdb() if dataset == "IMDB" else prepareAmazonDataset())
+
+print(data[data["label"] == 0].shape[0], "positive samples")
+data['lenStr'] = data['review'].apply(lambda x: len(x))
+
+print(data['lenStr'].describe())
+print(data[data["label"] == 1]["lenStr"].describe())
+print(data[data["label"] == 0]["lenStr"].describe())
 count_input_unk = data[data["input_ids"].apply(lambda x: vocab["<unk>"] in x)].shape[0]
 print("Count of samples with <unk> token:", count_input_unk)
-print("Count vocab tok percentage :" ,count_input_unk / data.shape[0] * 100)
-
+print("Count vocab tok percentage :" ,count_input_unk / data.shape[0] * 100)#
 
 train_, test_ = train_test_split(data, test_size=0.3, random_state=45)
-train_, valid_ = train_test_split(train_, test_size=0.2, random_state=32)
-
-test_ = test_.reset_index(drop = True)
-
+train_, valid_ = train_test_split(train_, test_size=0.2, random_state=32)#
+test_ = test_.reset_index(drop = True)#
 
 train_ = LabelsIdsDataset(train_["input_ids"].tolist(), train_["label"].tolist())
 test_dataloader = LabelsIdsDataset(test_["input_ids"].tolist(), test_["label"].tolist())
-valid_ = LabelsIdsDataset(valid_["input_ids"].tolist(), valid_["label"].tolist())
-
-val_filter_first, val_filter_second = 300, 600 
-
+valid_ = LabelsIdsDataset(valid_["input_ids"].tolist(), valid_["label"].tolist())#
+val_filter_first, val_filter_second = 300, 600 #
 train_dataloader = DataLoader(train_, batch_size=32, shuffle=True)
 test_dataloader = DataLoader(test_dataloader, batch_size=32, shuffle=False)
-valid_dataloader = DataLoader(valid_, batch_size=32, shuffle=True)
-
+valid_dataloader = DataLoader(valid_, batch_size=32, shuffle=True)#
 
 #setup training
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = TransformerClass(len(vocab), 128, vocab["<pad>"]).to(device)
+model = TransformerClass(len(vocab), 256, vocab["<pad>"]).to(device)
 loss_func = torch.nn.BCEWithLogitsLoss()
-learning_rate = 2e-4
+#learning_rate = 9e-4 most optimal for IMDB
+learning_rate = 9e-4
 optim = torch.optim.Adam(model.parameters(), lr = learning_rate)
-num_epochs = 10
+num_epochs = 15
 losses = []
 val_losses = []
 corrects = []
 valid_result = []
 val_corrects = []
 val_loss, val_correct, val_total = 0.0, 0, 0
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optim, 'min', patience=2)
-early_stopping = es(patience=5, min_delta=0.0001)
-
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optim, 'min', patience=4, factor=0.5)
+early_stopping = es(patience=6, min_delta=0.0001)
+val_acc_array = []
 if(runTrain):
-    for epoch in range(num_epochs):
-
+    for epoch in range(num_epochs):#
         for inputs, labels in train_dataloader:
             inputs = inputs.to(device)
             labels = labels.to(device).unsqueeze(1).float()
@@ -315,8 +325,7 @@ if(runTrain):
             optim.step()
             optim.zero_grad()
             losses.append(loss.item())
-        print(f'epoch {epoch}, loss : {loss.item()}')
-
+        print(f'epoch {epoch}, loss : {loss.item()}')#
         model.eval()
         #validation loop
         val_correct, val_total, val_loss = 0, 0, 0
@@ -330,23 +339,25 @@ if(runTrain):
                 predicted = torch.sigmoid(output_val) > 0.5
                 val_correct += (predicted == labels_val).sum().item()
                 val_total += labels_val.size(0)
-                val_losses.append(val_loss)
+                val_losses.append(val_loss.detach().cpu().numpy())
             val_corrects.append(val_correct)
             val_acc = val_correct / val_total
+            val_acc_array.append(val_acc)
             print(f"Validation [{epoch+1}], val_loss : {val_loss}, val_correct : {val_correct}, Total {val_total}, Accuracy : {val_acc}")
             if early_stopping(val_loss, model.state_dict()):
                 print("Loading best model weights")
                 model.load_state_dict(early_stopping.get_best_weights())
                 break
-        scheduler.step(val_loss)
+        print(f"Current LR: {optim.param_groups[0]['lr']}")
+        scheduler.step(val_loss)#
 
-    
+
 if(runTrain == False):
     if dataset == "IMDB":
         model.load_state_dict(torch.load("multihead_transformer_IMDB_0.84.pth"))
     else:
         model.load_state_dict(torch.load("multihead_transformer_Amazon_0.87.pth"))
-    model.eval()
+    model.eval()#
 
 fineTuneFlag = False
 if(fineTuneFlag and runTrain == False):
@@ -473,10 +484,8 @@ with torch.no_grad():
         all_labels.append(labels.cpu().numpy())
         example_start_idx = batch_id * test_dataloader.batch_size
         labels_bool = labels.bool()
-        #for i in range(len(predicted)):
         for i in range(len(predicted)):
             globax_idx = example_start_idx + i
-            #obj_for_debug['indexes'].append(globax_idx)
             if predicted[i] != labels_bool[i]:
                 text_Res = None
                 text = test_["review"][globax_idx]
@@ -497,22 +506,20 @@ with torch.no_grad():
                     "globalIdx" : globax_idx,
                     "input_ids" : input_ids[i].cpu().numpy().tolist()
                 }
-                obj_for_right_pred.append(correct_info)
-
+                obj_for_right_pred.append(correct_info)#
         correct += (predicted == labels.bool()).sum().item()
         total += labels.size(0)
         accuracy = correct / total
     print(f"Accuracy test {accuracy:.4f}")
-print(len(obj_for_debug))
+print(len(obj_for_debug))#
 
-## DEBUG
-
-
+### DEBUG#
+#
+#
 
 correct = 0
 total = 0
 accuracy_test = 0
-
 from collections import Counter
 tokens_list = []
 tokens_list_pos = []
@@ -522,7 +529,7 @@ for i in range(2000):
     tokens = obj_for_debug[i]["input_ids"]
     fist_token_pad = tokens.index(vocab["<pad>"]) if vocab["<pad>"] in tokens else len(tokens)
     tokens_without_pad = tokens[0:fist_token_pad]
-    tokens_list.extend(tokens_without_pad)
+    tokens_list.extend(tokens_without_pad)#
 
 for i in range(2000):
     tokens = obj_for_right_pred[i]["input_ids"]
@@ -545,7 +552,7 @@ for i in counter.items():
             "token_str" : text
         }
         frequent_tokens.append(debug_obj)
-        counter_values.append(i[0])
+        counter_values.append(i[0])#
 
 import tools.vector_checking as vc
 tokens_weight = None
@@ -553,107 +560,106 @@ with torch.no_grad():
     tokens_weight = model.emb.weight.data[counter_values].cpu().detach().numpy()
 data_for_scatter = []
 data_for_scattter_cos = []
-print(tokens_weight[0][0])
+print(tokens_weight[0][0])#
 
-coordinates_evc, coordinates_cos = vc.main(tokens_weight)
-
+coordinates_evc, coordinates_cos = vc.main(tokens_weight)#
 result_ngrams = vc.extract_nrgams(tokens_list, n = 3)
-result_ngrams_pos = vc.extract_nrgams(tokens_list_pos, n = 3)
+result_ngrams_pos = vc.extract_nrgams(tokens_list_pos, n = 3)#
 
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt#
 
 arr_items_neg = []
-arr_items_pos = []
+arr_items_pos = []#
 
 counter_Ngrams = Counter(result_ngrams)
 counter_PosNrgams = Counter(result_ngrams_pos)
 for item in counter_Ngrams.most_common(20):
     arr_items_neg.append({"ngram_text": vocab_itos[item[0][0]]+vocab_itos[item[0][1]]+vocab_itos[item[0][2]], "count": item[1], "color" : "red"})
 for item in counter_PosNrgams.most_common(20):
-    arr_items_pos.append({"ngram_text": vocab_itos[item[0][0]]+vocab_itos[item[0][1]]+vocab_itos[item[0][2]], "count": item[1], "color" : "green"})
+    arr_items_pos.append({"ngram_text": vocab_itos[item[0][0]]+vocab_itos[item[0][1]]+vocab_itos[item[0][2]], "count": item[1], "color" : "green"})#
 
 
 arr_temp = []
 arr_temp.extend(arr_items_neg)
-arr_temp.extend(arr_items_pos)
+arr_temp.extend(arr_items_pos)#
 
-# print ngram bar plot
+## print ngram bar plot#
 
-fig, (ax1, ax2) = plt.subplots(2,figsize=(20, 15))
+fig, (ax1, ax2, ax3) = plt.subplots(3,figsize=(20, 20))
 plt.subplots_adjust(wspace=2, hspace=3)
 conf_mat = confusion_matrix(np.concatenate(all_labels), np.concatenate(all_preds))
 ax1.bar([item["ngram_text"] for item in arr_temp], [item["count"] for item in arr_temp], color=[item["color"] for item in arr_temp], label='Negative Positive N-grams', width=0.6)
 ax2.set_title("Confusion Matrix")
 ax2.set_xlabel("Predicted Label")
 ax2.set_ylabel("True Label")
-sns.heatmap(conf_mat, annot=True, fmt="d", cmap='Blues', ax=ax2)
+ax3.plot(range(0, len(val_acc_array)),val_acc_array,label='Validation Accuracy')
+sns.heatmap(conf_mat, annot=True, fmt="d", cmap='Blues', ax=ax2)#
 
 precision = conf_mat[1][1] / (conf_mat[1][1] + conf_mat[0][1])
-recall = conf_mat[1][1] / (conf_mat[1][1] + conf_mat[1][0])
+recall = conf_mat[1][1] / (conf_mat[1][1] + conf_mat[1][0])#
 
-print(f"Precision: {precision:.4f}, Recall: {recall:.4f}")
+print(f"Precision: {precision:.4f}, Recall: {recall:.4f}")#
 
-class Debugger:
-    def __init__(self, vocab, model):
-        self.vocab = vocab
-        self.model = model
-    def build(self):
-        return self
+#class Debugger:
+#    def __init__(self, vocab, model):
+#        self.vocab = vocab
+#        self.model = model
+#    def build(self):
+#        return self#
+#
 
+## Debuger builder for transformer model
+#class TransformerDebugger(Debugger):
+#    def __init__(self, vocab, model):
+#        super().__init__(vocab, model)
+#    def build_word_emb_metrics(self, tokens_spec, token_words):
+#        print("Debug info word embeddings.....")
+#        #tokens_spec = ["<unk>", '.', '<pad>', '\'', ',', '!']
+#        #token_words =['of', 'movie', 'good', 'great', 'like', 'story']
+#        weights_spec = []
+#        weights_word = []
+#        with torch.no_grad():
+#            for i in tokens_spec:
+#                weights_spec.append(self.model.emb.weight[vocab[i]].data.cpu().detach().numpy())
+#            for i in token_words:
+#                weights_word.append(self.model.emb.weight[vocab[i]].data.cpu().detach().numpy())
+#        arr_cos_words = []
+#        arr_cos_spec = []#
 
-# Debuger builder for transformer model
-class TransformerDebugger(Debugger):
-    def __init__(self, vocab, model):
-        super().__init__(vocab, model)
-    def build_word_emb_metrics(self, tokens_spec, token_words):
-        print("Debug info word embeddings.....")
-        #tokens_spec = ["<unk>", '.', '<pad>', '\'', ',', '!']
-        #token_words =['of', 'movie', 'good', 'great', 'like', 'story']
-        weights_spec = []
-        weights_word = []
-        with torch.no_grad():
-            for i in tokens_spec:
-                weights_spec.append(self.model.emb.weight[vocab[i]].data.cpu().detach().numpy())
-            for i in token_words:
-                weights_word.append(self.model.emb.weight[vocab[i]].data.cpu().detach().numpy())
-        arr_cos_words = []
-        arr_cos_spec = []
+#        for i in range(len(weights_word)):
+#            result = cosine(weights_spec[0], weights_word[i])
+#            print("Cosine between <unk> and", token_words[i], ":", result)
+#            arr_cos_words.append(cosine(weights_spec[0], weights_word[i]))
+#        for i in range(1, len(weights_spec)):
+#            result = cosine(weights_spec[0], weights_spec[i])
+#            print("Cosine between <unk> and", tokens_spec[i], ":", result)
+#            arr_cos_spec.append(cosine(weights_spec[0], weights_spec[i]))#
 
-        for i in range(len(weights_word)):
-            result = cosine(weights_spec[0], weights_word[i])
-            print("Cosine between <unk> and", token_words[i], ":", result)
-            arr_cos_words.append(cosine(weights_spec[0], weights_word[i]))
-        for i in range(1, len(weights_spec)):
-            result = cosine(weights_spec[0], weights_spec[i])
-            print("Cosine between <unk> and", tokens_spec[i], ":", result)
-            arr_cos_spec.append(cosine(weights_spec[0], weights_spec[i]))
+#        print("Special tokens weights:", cosine(weights_spec[0], weights_word[0]))
+#        print("Special tokens weights:", cosine(weights_spec[0], weights_word[1]))#
 
-        print("Special tokens weights:", cosine(weights_spec[0], weights_word[0]))
-        print("Special tokens weights:", cosine(weights_spec[0], weights_word[1]))
+#        print("Norm of spec tok", torch.norm(torch.tensor(weights_spec[0])))
+#        print("Norm of of word", torch.norm(torch.tensor(weights_word[0])))#
 
-        print("Norm of spec tok", torch.norm(torch.tensor(weights_spec[0])))
-        print("Norm of of word", torch.norm(torch.tensor(weights_word[0])))
+#        return self
+#    def build_conf_matrix(self, all_labels, all_preds):
+#        self.conf_matrix = confusion_matrix(np.concatenate(all_labels), np.concatenate(all_preds))
+#        return self
+#    def build_precision_recall(self):
+#        self.precision = self.conf_matrix[1][1] / (self.conf_matrix[1][1] + self.conf_matrix[0][1])
+#        self.recall = self.conf_matrix[1][1] / (self.conf_matrix[1][1] + self.conf_matrix[1][0])
+#        return self
+#    def build_ngrams_analysis(self, tokens_list, tokens_list_pos, n = 3):
+#        from collections import Counter
+#        from scipy.spatial.distance import cosine
+#        import tools.vector_checking as vc
+#        result_ngrams = vc.extract_nrgams(tokens_list, n = n)
+#        result_ngrams_pos = vc.extract_nrgams(tokens_list_pos, n = n)
+#        self.counter_Ngrams = Counter(result_ngrams)
+#        self.counter_PosNrgams = Counter(result_ngrams_pos)
+#        return self#
 
-        return self
-    def build_conf_matrix(self, all_labels, all_preds):
-        self.conf_matrix = confusion_matrix(np.concatenate(all_labels), np.concatenate(all_preds))
-        return self
-    def build_precision_recall(self):
-        self.precision = self.conf_matrix[1][1] / (self.conf_matrix[1][1] + self.conf_matrix[0][1])
-        self.recall = self.conf_matrix[1][1] / (self.conf_matrix[1][1] + self.conf_matrix[1][0])
-        return self
-    def build_ngrams_analysis(self, tokens_list, tokens_list_pos, n = 3):
-        from collections import Counter
-        from scipy.spatial.distance import cosine
-        import tools.vector_checking as vc
-        result_ngrams = vc.extract_nrgams(tokens_list, n = n)
-        result_ngrams_pos = vc.extract_nrgams(tokens_list_pos, n = n)
-        self.counter_Ngrams = Counter(result_ngrams)
-        self.counter_PosNrgams = Counter(result_ngrams_pos)
-        return self
-
-def debug_info_word_emb(vocab, model):
-
+def debug_info_word_emb(vocab, model):#
     print("Debug info word embeddings.....")
     tokens_spec = ["<unk>", '.', '<pad>', '\'', ',', '!']
     token_words =['of', 'movie', 'good', 'great', 'like', 'story']
@@ -665,8 +671,7 @@ def debug_info_word_emb(vocab, model):
         for i in token_words:
             weights_word.append(model.emb.weight[vocab[i]].data.cpu().detach().numpy())
     arr_cos_words = []
-    arr_cos_spec = []
-
+    arr_cos_spec = []#
     for i in range(len(weights_word)):
         result = cosine(weights_spec[0], weights_word[i])
         print("Cosine between <unk> and", token_words[i], ":", result)
@@ -677,38 +682,39 @@ def debug_info_word_emb(vocab, model):
         arr_cos_spec.append(cosine(weights_spec[0], weights_spec[i]))
     
     print("Special tokens weights:", cosine(weights_spec[0], weights_word[0]))
-    print("Special tokens weights:", cosine(weights_spec[0], weights_word[1]))
-
+    print("Special tokens weights:", cosine(weights_spec[0], weights_word[1]))#
     print("Norm of spec tok", torch.norm(torch.tensor(weights_spec[0])))
     print("Norm of of word", torch.norm(torch.tensor(weights_word[0])))
+
 debug_info_word_emb(vocab, model)
-#tokens_spec = ["<unk>", '.', '<pad>', '\'', ',', '!']
-#token_words =['of', 'movie', 'good', 'great', 'like', 'story']
-#weights_spec = []
-#weights_word = []
-#
-#
-#with torch.no_grad():
-#    for i in tokens_spec:
-#        weights_spec.append(model.emb.weight[vocab[i]].data.cpu().detach().numpy())
-#    for i in token_words:
-#        weights_word.append(model.emb.weight[vocab[i]].data.cpu().detach().numpy())
-#arr_cos_words = []
-#arr_cos_spec = []
-#for i in range(len(weights_word)):
-#    result = cosine(weights_spec[0], weights_word[i])
-#    print("Cosine between <unk> and", token_words[i], ":", result)
-#    arr_cos_words.append(cosine(weights_spec[0], weights_word[i]))
-#for i in range(1, len(weights_spec)):
-#    result = cosine(weights_spec[0], weights_spec[i])
-#    print("Cosine between <unk> and", tokens_spec[i], ":", result)
-#    arr_cos_spec.append(cosine(weights_spec[0], weights_spec[i]))
-#
-#print("Special tokens weights:", cosine(weights_spec[0], weights_word[0]))
-#print("Special tokens weights:", cosine(weights_spec[0], weights_word[1]))
-#
-#print("Norm of spec tok", torch.norm(torch.tensor(weights_spec[0])))
-#print("Norm of of word", torch.norm(torch.tensor(weights_word[0])))
+
+tokens_spec = ["<unk>", '.', '<pad>', '\'', ',', '!']
+token_words =['of', 'movie', 'good', 'great', 'like', 'story']
+weights_spec = []
+weights_word = []
+
+
+with torch.no_grad():
+    for i in tokens_spec:
+        weights_spec.append(model.emb.weight[vocab[i]].data.cpu().detach().numpy())
+    for i in token_words:
+        weights_word.append(model.emb.weight[vocab[i]].data.cpu().detach().numpy())
+arr_cos_words = []
+arr_cos_spec = []
+for i in range(len(weights_word)):
+    result = cosine(weights_spec[0], weights_word[i])
+    print("Cosine between <unk> and", token_words[i], ":", result)
+    arr_cos_words.append(cosine(weights_spec[0], weights_word[i]))
+for i in range(1, len(weights_spec)):
+    result = cosine(weights_spec[0], weights_spec[i])
+    print("Cosine between <unk> and", tokens_spec[i], ":", result)
+    arr_cos_spec.append(cosine(weights_spec[0], weights_spec[i]))
+
+print("Special tokens weights:", cosine(weights_spec[0], weights_word[0]))
+print("Special tokens weights:", cosine(weights_spec[0], weights_word[1]))
+
+print("Norm of spec tok", torch.norm(torch.tensor(weights_spec[0])))
+print("Norm of of word", torch.norm(torch.tensor(weights_word[0])))#
 
 if(runTrain):
     torch.save(model.state_dict(), f"multihead_transformer_{dataset}_{accuracy:.2f}.pth")
