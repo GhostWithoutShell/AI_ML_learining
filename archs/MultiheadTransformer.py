@@ -3,7 +3,7 @@ import torch
 import torchtext
 from torchtext.data.utils import get_tokenizer
 from torchtext.vocab import build_vocab_from_iterator
-from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.metrics import classification_report, confusion_matrix, roc_curve
 from sklearn.model_selection import train_test_split
 import seaborn as sns
 import numpy as np
@@ -16,7 +16,8 @@ import json
 from sklearn.metrics import confusion_matrix
 import spacy
 from scipy.spatial.distance import cosine
-
+from sklearn.metrics import roc_curve, auc
+import torch.nn.functional as F
 from Earlystop import EarlyStopping as es
 class PoolingLayer(nn.Module):
     def __init__(self, pad_index):
@@ -85,34 +86,31 @@ class TransformerClass(nn.Module):
         self.emb = nn.Embedding(vocab_size, embeding_dim)
         self.pos_emb = nn.Embedding(512, embeding_dim)
         self.attention = MultiheadAttention(embeding_dim, pad_index, 8)
-        self.dropAttention = nn.Dropout(0.2)
+        self.dropAttention = nn.Dropout(0.25)
         #self.normAttention = nn.LayerNorm(embeding_dim)
         self.attention2 = MultiheadAttention(embeding_dim, pad_index, 4)
         self.attention3 = MultiheadAttention(embeding_dim, pad_index, 2)
         self.pooling = PoolingLayer(pad_index)
         self.norm = nn.LayerNorm(embeding_dim)
-        self.drop = nn.Dropout(0.5)
+        self.drop = nn.Dropout(0.3)
         self.lin = nn.Linear(embeding_dim, 1)
     def forward(self, x):
-        residual_x = x
         self.input_ids = x
         word_emb = self.emb(x)
         positions = torch.arange(0, x.size(1)).to(x.device)
         pos_x = self.pos_emb(positions)
 
         x = word_emb + pos_x
-        res_emb_x = x
-        x = self.attention(x, self.input_ids)
-        x_res_att = x
-        x = self.dropAttention(x)
-        #x = self.normAttention(x)
-        x = self.attention2(x, self.input_ids)
-        x = x + res_emb_x + x_res_att
-        x = self.attention3(x, self.input_ids)
-        x = x + (x_res_att + res_emb_x)
-        x = self.dropAttention(x)
-        x = self.pooling(x, self.input_ids, type = 0)
-        #x = x + residual_x.float()
+        x1 = self.attention(x, self.input_ids)
+        x1 = self.dropAttention(x1)
+        x1 = self.norm(x1)
+        x2 = self.attention2(x1, self.input_ids) + x1
+        x2 = self.norm(x2)
+        x2 = self.dropAttention(x2)
+        x3 = self.attention3(x2, self.input_ids) + x2
+        x3 = self.norm(x3)
+        x3 = self.dropAttention(x3)
+        x = self.pooling(x3, self.input_ids, type = 0)
         x = self.norm(x)
         x = self.drop(x)
         x = self.lin(x)
@@ -130,27 +128,24 @@ class LabelsIdsDataset(Dataset):
         input_tensor = torch.tensor(self.inputs[index], dtype=torch.long)
         labels_tensor = torch.tensor(self.labels[index], dtype=torch.float)
         return input_tensor, labels_tensor
-
+class LabelSmoothingBCELoss(nn.Module):
+    def __init__(self, smoothing=0.1):
+        super().__init__()
+        self.smoothing = smoothing
+        
+    def forward(self, pred, target):
+        target = target * (1 - self.smoothing) + 0.5 * self.smoothing
+        return F.binary_cross_entropy_with_logits(pred, target)
 
 
 
 def prepareAmazonDataset():
-    #tokenizer = get_tokenizer("basic_english")
     tokenizer = get_tokenizer("basic_english")
     def remove_emojis(text):
         return text.encode('ascii', 'ignore').decode('ascii')
 
     def clean_text(text):
-        #text = re.sub(r'[^а-яА-Яa-zA-Z0-9\s.,!?:;\'"()\[\]{}@#$%^&*+=\-/\\]', '', text)
         text = re.sub(r'\s+', ' ', text).strip()
-        #text = text.replace("it's", "it is")
-        #text = text.replace("isn't", "is not")
-        #text = text.replace("wasn't", "was not")
-        #text = text.replace("don't", "do not")
-        #text = text.replace("idon't", "i do not")
-        #text = text.replace("there`s", "there is")
-
-
         return text
     def generate_token_spacy(dt, tokenizer):
         for text in dt:
@@ -175,7 +170,6 @@ def prepareAmazonDataset():
     df_text.columns = ["label", "Subject", "Body"]
     df_text_splited = df_text[:90000].copy().reset_index(drop=True)
     df_text_splited = df_text_splited.dropna()
-    label_variations = df_text_splited['label'].unique()
     df_text_splited['label'] = df_text_splited["label"].map(lambda x: 0 if x == 1 else 1)
     df_text_splited['Subject'] = df_text_splited['Subject'].fillna('')
     df_text_splited['Body'] = df_text_splited['Body'].fillna('')
@@ -186,7 +180,7 @@ def prepareAmazonDataset():
     df_text_splited["Subject"] = df_text_splited["Subject"].apply(clean_text)
     df_text_splited["Body"] = df_text_splited["Body"].apply(clean_text)
     gen = generate_token_spacy(df_text_splited["Subject"]+df_text_splited["Body"], tokenizer)
-    vocab = build_vocab_from_iterator(gen, specials=["<unk>", "<pad>"], max_tokens=20000)
+    vocab = build_vocab_from_iterator(gen, specials=["<unk>", "<pad>"], max_tokens=30000)
     vocab.set_default_index(vocab["<unk>"])
     index_pad = vocab["<pad>"]
     df_text_splited["review"] = df_text_splited["Subject"] + " " + df_text_splited["Body"]
@@ -195,10 +189,7 @@ def prepareAmazonDataset():
     return df_text_splited, vocab
 
 def prepareDataForImdb():
-    #tokenizer = get_tokenizer("moses")
-    def generate_token_spacy(dt, tokenizer):
-        for text in dt:
-            yield tokenizer(text)
+    
     tokenizer = get_tokenizer("basic_english")
     def labelFix(dt):
         if dt == 'positive':
@@ -219,21 +210,9 @@ def prepareDataForImdb():
             indexes = indexes[0:256]
         return indexes
     def clean_text(text):
-        # to aggressive cleaning
-        #text = re.sub(r'[^а-яА-Яa-zA-Z0-9\s.,!?:;\'"()\[\]{}@#$%^&*+=\-/\\]', '', text)
         text = re.sub(r'\s+', ' ', text).strip()
-        text = text.replace("it's", "it is")
-        text = text.replace("isn't", "is not")
-        text = text.replace("wasn't", "was not")
-        text = text.replace("don't", "do not")
-        text = text.replace("idon't", "i do not")
-        text = text.replace("there`s", "there is")
-        text = text.replace("alotof", "a lot of")
-        text = text.replace("thereis", "there is")
-        text = text.replace("filmis", "film is")
-        text = text.replace("he`s", "he is")
-        text = text.replace(".ifyou", "if you")
-        text = text.replace("idonot", "i do not")
+        text = re.sub(r'Aspect ratio:.*?(?=\n|$)', '', text)
+        text = re.sub(r'Sound format:.*?(?=\n|$)', '', text)
         return text
     data = pd.read_csv('D:\MyFiles\Datasets\IMDB\IMDB Dataset.csv')
     data.columns = ['review', 'label']
@@ -251,7 +230,7 @@ def prepareDataForImdb():
             yield tokenizer(text)
     
     gen = gen_tokenizer(data['review'], tokenizer=tokenizer)
-    #max_tokens = (10000 if dataset == "IMDB" else 15000)
+    
     max_tokens = 25000
     vocab = build_vocab_from_iterator(gen, specials=['<unk>', '<pad>'], max_tokens=max_tokens)
     vocab.set_default_index(vocab["<unk>"])
@@ -259,8 +238,6 @@ def prepareDataForImdb():
     stoi = vocab.get_stoi()
     with open("vocab.json", "w", encoding = "utf-8") as f:
         json.dump(stoi, f, ensure_ascii=False, indent=2)
-    #gen = gen_tokenizer_spacy(data['review'], tokenizer=tokenizer)
-    #vocab = build_vocab_from_iterator(gen, specials=['<unk>', '<pad>'], max_tokens=15000)
     vocab.set_default_index(vocab["<unk>"])
     data["input_ids"] = data["review"].apply(pad_and_encode, index_pad=vocab["<pad>"])
     stoi = vocab.get_stoi()
@@ -271,7 +248,7 @@ def prepareDataForImdb():
     print("Index test :", vocab["13dfsdafsf"])
     return data, vocab
 runTrain = True
-dataset = "IMDB" #"IMDB"  #"Amazon"
+dataset = "Amazon" #"IMDB"  #"Amazon"
 
 data, vocab = (prepareDataForImdb() if dataset == "IMDB" else prepareAmazonDataset())
 
@@ -279,15 +256,23 @@ print(data[data["label"] == 0].shape[0], "positive samples")
 data['lenStr'] = data['review'].apply(lambda x: len(x))
 
 print(data['lenStr'].describe())
-print(data[data["label"] == 1]["lenStr"].describe())
-print(data[data["label"] == 0]["lenStr"].describe())
+print("Count positive ",data[data["label"] == 1]["lenStr"].describe())
+print("Count negative ",data[data["label"] == 0]["lenStr"].describe())
 count_input_unk = data[data["input_ids"].apply(lambda x: vocab["<unk>"] in x)].shape[0]
+count_input_unk_without = data[data["input_ids"].apply(lambda x: vocab["<unk>"] not in x)].shape[0]
 print("Count of samples with <unk> token:", count_input_unk)
+print("Count of samples without <unk> token:", count_input_unk_without)
 print("Count vocab tok percentage :" ,count_input_unk / data.shape[0] * 100)#
+
 
 train_, test_ = train_test_split(data, test_size=0.3, random_state=45)
 train_, valid_ = train_test_split(train_, test_size=0.2, random_state=32)#
 test_ = test_.reset_index(drop = True)#
+
+
+print("Balance of values in train set ", train_['label'].value_counts())
+print("Balance of values in valid set ", valid_['label'].value_counts())
+print("Balance of values in test set ", test_['label'].value_counts())
 
 train_ = LabelsIdsDataset(train_["input_ids"].tolist(), train_["label"].tolist())
 test_dataloader = LabelsIdsDataset(test_["input_ids"].tolist(), test_["label"].tolist())
@@ -301,19 +286,26 @@ valid_dataloader = DataLoader(valid_, batch_size=32, shuffle=True)#
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = TransformerClass(len(vocab), 256, vocab["<pad>"]).to(device)
 loss_func = torch.nn.BCEWithLogitsLoss()
+
+data['label'].value_counts()
+
 #learning_rate = 9e-4 most optimal for IMDB
-learning_rate = 9e-4
-optim = torch.optim.Adam(model.parameters(), lr = learning_rate)
-num_epochs = 15
+learning_rate = 8e-4
+optim = torch.optim.AdamW(model.parameters(), lr = learning_rate)
+num_epochs = 12
 losses = []
 val_losses = []
 corrects = []
 valid_result = []
 val_corrects = []
 val_loss, val_correct, val_total = 0.0, 0, 0
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optim, 'min', patience=4, factor=0.5)
-early_stopping = es(patience=6, min_delta=0.0001)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optim, 'min', patience=3, factor=0.5)
+early_stopping = es(patience=3, min_delta=0.0001)
 val_acc_array = []
+
+print("Last layer bias:", model.lin.bias.item())
+print("Last layer weight mean:", model.lin.weight.mean().item())
+
 if(runTrain):
     for epoch in range(num_epochs):#
         for inputs, labels in train_dataloader:
@@ -343,7 +335,7 @@ if(runTrain):
             val_corrects.append(val_correct)
             val_acc = val_correct / val_total
             val_acc_array.append(val_acc)
-            print(f"Validation [{epoch+1}], val_loss : {val_loss}, val_correct : {val_correct}, Total {val_total}, Accuracy : {val_acc}")
+            print(f"Validation [{epoch}], val_loss : {val_loss}, val_correct : {val_correct}, Total {val_total}, Accuracy : {val_acc}")
             if early_stopping(val_loss, model.state_dict()):
                 print("Loading best model weights")
                 model.load_state_dict(early_stopping.get_best_weights())
@@ -368,7 +360,7 @@ if(fineTuneFlag and runTrain == False):
     model.attention.value.weight.requires_grad = False
     model.attention.query.weight.requires_grad = False
     #model.attention.norm.weight.requires_grad = False
-    data, vocab = prepareAmazonDataset()
+    data, vocab = prepareDataForImdb()
     train_, test_ = train_test_split(data, test_size=0.3, random_state=45)
     train_, valid_ = train_test_split(train_, test_size=0.2, random_state=32)
     test_ = test_.reset_index(drop = True)
@@ -379,7 +371,7 @@ if(fineTuneFlag and runTrain == False):
     valid_dataloader = DataLoader(valid_dataset, batch_size=32, shuffle=True)
     test_dataloader = DataLoader(test_dataset, batch_size=32, shuffle=False)
     learning_rate = 1e-4
-    optim = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr = learning_rate)
+    optim = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr = learning_rate)
     correct = 0 
     total = 0
     all_preds = []
@@ -466,24 +458,32 @@ if(fineTuneFlag and runTrain == False):
 correct = 0 
 total = 0
 all_preds = []
+all_probs = []
 all_pred_ids = []
 all_labels = []
 incorrect_vals = []
+probs = []
 obj_for_debug = []
 obj_for_right_pred = []
 accuracy = 0
+labels_probs = []
 #if runTrain:
 with torch.no_grad():
     for batch_id, (input_ids, labels) in enumerate(test_dataloader):
         input_ids, labels = input_ids.to(device), labels.to(device).unsqueeze(1).float()
         output = model(input_ids)
-        predicted = torch.sigmoid(output) > 0.5
+        predicted = torch.sigmoid(output) > 0.55
         
         all_preds.append(predicted.cpu().numpy())
         all_pred_ids.append(output)
         all_labels.append(labels.cpu().numpy())
         example_start_idx = batch_id * test_dataloader.batch_size
         labels_bool = labels.bool()
+        all_probs.append(torch.sigmoid(output).squeeze().cpu().numpy())
+        probs_ = torch.sigmoid(output).squeeze().cpu().numpy()
+        probs.append(probs_.flatten())
+        labels_probs.append(labels.squeeze().cpu().numpy().flatten())
+
         for i in range(len(predicted)):
             globax_idx = example_start_idx + i
             if predicted[i] != labels_bool[i]:
@@ -498,7 +498,8 @@ with torch.no_grad():
                     "color_metric" : text_Res,
                     "globalIdx" : globax_idx,
                     "textLen" : len(text),
-                    "input_ids" : input_ids[i].cpu().numpy().tolist()
+                    "input_ids" : input_ids[i].cpu().numpy().tolist(),
+                    "uncertain" : True if abs(torch.sigmoid(output[i]) - 0.5) < 0.1 else False
                 }
                 obj_for_debug.append(error_info)
             else:
@@ -513,10 +514,87 @@ with torch.no_grad():
     print(f"Accuracy test {accuracy:.4f}")
 print(len(obj_for_debug))#
 
-### DEBUG#
-#
-#
+all_probs_np = np.concatenate(all_probs)
+all_labels_np = np.concatenate(all_labels)
+all_probs_np_squeezed = np.concatenate(probs)
+all_labels_np_squeezed = np.concatenate(labels_probs)
 
+for threshold in [0.5, 0.55, 0.6, 0.65, 0.658]:
+    predicted = all_probs_np_squeezed > threshold
+    accuracy = (predicted == all_labels_np_squeezed).sum() / len(all_labels_np_squeezed)
+    print(f"Threshold {threshold:.3f}: Accuracy {accuracy:.4f}")
+
+### DEBUG#
+##
+#
+print("First batch probs:", all_probs[0])
+print("First batch probs shape:", all_probs[0].shape)
+
+print("Shape first element:", all_probs[0].shape if hasattr(all_probs[0], 'shape') else len(all_probs[0]))
+
+all_probs_np = np.concatenate(all_probs)
+all_labels_np = np.concatenate(all_labels)
+all_labels_np = all_labels_np.squeeze()
+fpr, tpr, thresholds = roc_curve(all_labels_np, all_probs_np)
+# Найди оптимальный порог (где TPR-FPR максимальна)
+
+
+optimal_idx = np.argmax(tpr - fpr)
+optimal_threshold = thresholds[optimal_idx]
+
+print("Treshold for classification:", optimal_threshold)
+import matplotlib.pyplot as plt
+
+def show_roc_auc_graph(fpr, tpr):
+    roc_auc = auc(fpr, tpr)
+    plt.plot(fpr, tpr, label=f'ROC (AUC = {roc_auc:.2f})')
+    plt.plot([0, 1], [0, 1], 'k--', label='Random')
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate (Recall)')
+    plt.title('ROC Curve')
+    plt.legend()
+    plt.show()
+    
+def show_histogream_with_distrib_fp_fn(obj_for_debug):
+    false_neg = [i["textLen"] for i in obj_for_debug if i["color_metric"] == "False Negative"]
+    false_pos = [i["textLen"] for i in obj_for_debug if i["color_metric"] == "False Positive"]  
+
+    plt.figure(figsize=(12, 5))
+    plt.hist([false_neg, false_pos], bins=30, label=['False Negative', 'False Positive'], 
+             color=['red', 'blue'], alpha=0.6)
+    plt.xlabel('Text Length')
+    plt.ylabel('Count')
+    plt.legend()
+    plt.title('Distribution of Text Lengths in Errors')
+    plt.show()
+def show_plot_with_distrib_of_percentage(all_probs_sigmoid, optimal_threshold=0.65):
+    plt.figure(figsize=(10, 5))
+    plt.hist(all_probs_sigmoid, bins=50, edgecolor='black')
+    plt.xlabel('Predicted Probability')
+    plt.ylabel('Count')
+    plt.title('Distribution of Model Predictions')
+    plt.axvline(x=0.5, color='r', linestyle='--', label='Default threshold (0.5)')
+    plt.axvline(x=optimal_threshold, color='g', linestyle='--', label='Optimal threshold (0.65)')
+    plt.legend()
+    plt.show()
+
+all_probs_flat = np.concatenate([p.squeeze().cpu().numpy() for p in all_pred_ids])
+all_probs_sigmoid = 1 / (1 + np.exp(-all_probs_flat))  # Если это логиты
+# Гистограмма длин текстов для ложных отрицательных и ложных положительных ошибок
+show_histogream_with_distrib_fp_fn(obj_for_debug)
+show_plot_with_distrib_of_percentage(all_probs_sigmoid,optimal_threshold)
+show_roc_auc_graph(fpr, tpr)
+
+
+
+
+
+false_positives = [e for e in obj_for_debug if e["color_metric"] == "False Positive"]
+false_negatives = [e for e in obj_for_debug if e["color_metric"] == "False Negative"]
+print(f"False Positives: {len(false_negatives)}")
+
+for i in range(5):
+    print(f"\n{i+1}. Текст: {false_negatives[i]['text'][:300]}")
 correct = 0
 total = 0
 accuracy_test = 0
@@ -566,10 +644,10 @@ coordinates_evc, coordinates_cos = vc.main(tokens_weight)#
 result_ngrams = vc.extract_nrgams(tokens_list, n = 3)
 result_ngrams_pos = vc.extract_nrgams(tokens_list_pos, n = 3)#
 
-import matplotlib.pyplot as plt#
+
 
 arr_items_neg = []
-arr_items_pos = []#
+arr_items_pos = []
 
 counter_Ngrams = Counter(result_ngrams)
 counter_PosNrgams = Counter(result_ngrams_pos)
@@ -686,7 +764,14 @@ def debug_info_word_emb(vocab, model):#
     print("Norm of spec tok", torch.norm(torch.tensor(weights_spec[0])))
     print("Norm of of word", torch.norm(torch.tensor(weights_word[0])))
 
+
 debug_info_word_emb(vocab, model)
+uncertrain = [i for i in obj_for_debug if i["uncertrain"] == True]
+
+print("Uncertrain cases:")
+for i in uncertrain:
+    print(i)
+
 
 tokens_spec = ["<unk>", '.', '<pad>', '\'', ',', '!']
 token_words =['of', 'movie', 'good', 'great', 'like', 'story']
@@ -710,11 +795,6 @@ for i in range(1, len(weights_spec)):
     print("Cosine between <unk> and", tokens_spec[i], ":", result)
     arr_cos_spec.append(cosine(weights_spec[0], weights_spec[i]))
 
-print("Special tokens weights:", cosine(weights_spec[0], weights_word[0]))
-print("Special tokens weights:", cosine(weights_spec[0], weights_word[1]))
-
-print("Norm of spec tok", torch.norm(torch.tensor(weights_spec[0])))
-print("Norm of of word", torch.norm(torch.tensor(weights_word[0])))#
 
 if(runTrain):
     torch.save(model.state_dict(), f"multihead_transformer_{dataset}_{accuracy:.2f}.pth")
