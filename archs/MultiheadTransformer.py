@@ -59,7 +59,8 @@ class FFLayer(nn.Module):
 class MultiheadAttention(nn.Module):
     def __init__(self, size_kernel, pad_index, num_heads):
         super().__init__()
-        self.size = size_kernel
+        self.emb_dim = size_kernel
+        self.head_dim = size_kernel // num_heads
         self.pad_index = pad_index
         self.num_heads = num_heads
         self.key = nn.Linear(size_kernel, int(size_kernel))
@@ -70,35 +71,28 @@ class MultiheadAttention(nn.Module):
         self.projection = nn.Linear(size_kernel, size_kernel)
         
     def forward(self, x, input_ids):
-        #residual_x = x
-        x_k = self.key(x)
-        x_v = self.value(x)
-        x_q = self.query(x)
-        x_q_head = x_q.view(x_q.shape[0], x_q.shape[1], self.num_heads, self.size // self.num_heads)
-        x_k_head = x_k.view(x_k.shape[0], x_k.shape[1], self.num_heads, self.size // self.num_heads)
-        x_v_head = x_v.view(x_v.shape[0], x_v.shape[1], self.num_heads, self.size // self.num_heads)
-        pad_mask = (input_ids != self.pad_index)
-        results = []
-        mask_rows = pad_mask.unsqueeze(-2)
-        for i in range(self.num_heads):
-            x_q_head_val = x_q_head[:,:,i,:]
-            x_k_head_val = x_k_head[:,:,i,:]
-            x_v_head_val = x_v_head[:,:,i,:]
+        batch_size, seq_len, _ = x.shape
+        k = self.key(x).view(batch_size, seq_len, self.num_heads, self.head_dim)
+        v = self.value(x).view(batch_size, seq_len, self.num_heads, self.head_dim)
+        q = self.query(x).view(batch_size, seq_len, self.num_heads, self.head_dim)
 
-            transpose_k_head = torch.transpose(x_k_head_val, -2, -1)
-            att_score = torch.matmul(x_q_head_val, transpose_k_head)
+        k = k.transpose(1,2)
+        v = v.transpose(1,2)
+        q = q.transpose(1,2)
 
-            score = att_score/math.sqrt(self.size // self.num_heads)
-            score = score.masked_fill(~mask_rows, -float('inf'))
-            weight = torch.softmax(score, dim=-1)
-            result_mat = torch.matmul(weight, x_v_head_val)
-        
-            results.append(result_mat)
-        result = torch.cat(results, dim = -1)
-        
-        result = self.projection(result)
-        
-        return result
+        att_scores = torch.matmul(q, k.transpose(-2, -1))
+        att_scores = att_scores/math.sqrt(self.num_heads)
+        mask = (input_ids != self.pad_index).unsqueeze(1).unsqueeze(2)
+
+        att_scores = att_scores.masked_fill(mask == 0, -1e9)
+        att_scores = torch.softmax(att_scores, dim=-1)
+
+
+        result = torch.matmul(att_scores, v)
+        result = result.transpose(1, 2).contiguous()
+        result = result.view(batch_size, seq_len, self.emb_dim)
+        output = self.projection(result)
+        return output
 
 class TransformerBlock(nn.Module):
     def __init__(self, size_kernel, pad_index, num_heads):
