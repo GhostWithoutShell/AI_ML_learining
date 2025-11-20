@@ -18,6 +18,13 @@ import spacy
 from scipy.spatial.distance import cosine
 from sklearn.metrics import roc_curve, auc
 import torch.nn.functional as F
+from tokenizers import Tokenizer
+from tokenizers.models import WordPiece
+from tokenizers.trainers import WordPieceTrainer
+import os
+from tokenizers.pre_tokenizers import Whitespace
+
+
 from Earlystop import EarlyStopping as es
 class PoolingLayer(nn.Module):
     def __init__(self, pad_index):
@@ -34,6 +41,20 @@ class PoolingLayer(nn.Module):
         else:
             result = sum_emb/num_tokens
         return result
+class FFLayer(nn.Module):
+    def __init__(self, embeding, expansion=4):
+        super().__init__()
+        self.ff = nn.Sequential(
+            nn.Linear(embeding, embeding*expansion),
+            nn.ReLU(),
+            nn.Linear(embeding*expansion, embeding),
+            nn.Dropout(0.2),
+        )
+    def forward(self, x):
+        return self.ff(x)
+
+
+
 
 class MultiheadAttention(nn.Module):
     def __init__(self, size_kernel, pad_index, num_heads):
@@ -47,8 +68,9 @@ class MultiheadAttention(nn.Module):
         self.norm = nn.LayerNorm(size_kernel)
         self.drop = nn.Dropout(0.2)
         self.projection = nn.Linear(size_kernel, size_kernel)
+        
     def forward(self, x, input_ids):
-        residual_x = x
+        #residual_x = x
         x_k = self.key(x)
         x_v = self.value(x)
         x_q = self.query(x)
@@ -70,52 +92,85 @@ class MultiheadAttention(nn.Module):
             score = score.masked_fill(~mask_rows, -float('inf'))
             weight = torch.softmax(score, dim=-1)
             result_mat = torch.matmul(weight, x_v_head_val)
-            #print(f"Голова {i}: result_mat.shape = {result_mat.shape}")
         
             results.append(result_mat)
         result = torch.cat(results, dim = -1)
-        # residual  connection
+        
         result = self.projection(result)
-        x = result + residual_x
+        
+        return result
+
+class TransformerBlock(nn.Module):
+    def __init__(self, size_kernel, pad_index, num_heads):
+        super().__init__()
+        self.attention = MultiheadAttention(size_kernel, pad_index, num_heads)
+        self.norm1 = nn.LayerNorm(size_kernel)
+        self.norm2 = nn.LayerNorm(size_kernel)
+        self.ff = FFLayer(size_kernel)
+        self.drop = nn.Dropout(0.2)
+    def forward(self, x, input_ids):
+        att_out = self.attention(x, input_ids)
+        x = self.norm1(x + self.drop(att_out))
+        ff_out = self.ff(x)
+        x = self.norm2(x + self.drop(ff_out))
         return x
+    
 
 class TransformerClass(nn.Module):
     def __init__(self, vocab_size, embeding_dim, pad_index):
         super().__init__()
-        print("EmbDim :", embeding_dim)
+        self.pad_index = pad_index
         self.emb = nn.Embedding(vocab_size, embeding_dim)
         self.pos_emb = nn.Embedding(512, embeding_dim)
-        self.attention = MultiheadAttention(embeding_dim, pad_index, 8)
-        self.dropAttention = nn.Dropout(0.25)
-        #self.normAttention = nn.LayerNorm(embeding_dim)
-        self.attention2 = MultiheadAttention(embeding_dim, pad_index, 4)
-        self.attention3 = MultiheadAttention(embeding_dim, pad_index, 2)
+        self.attBlock1 = TransformerBlock(embeding_dim, pad_index, 8)
+        self.attBlock2 = TransformerBlock(embeding_dim, pad_index, 8)
+        #self.attBlock3 = TransformerBlock(embeding_dim, pad_index, 4)
+        
+        ##self.attention = MultiheadAttention(embeding_dim, pad_index, 4)
+        #self.dropAttention = nn.Dropout(0.2)
+        ##self.normAttention = nn.LayerNorm(embeding_dim)
+        #self.attention2 = MultiheadAttention(embeding_dim, pad_index, 4)
+        #self.attention3 = MultiheadAttention(embeding_dim, pad_index, 4)
         self.pooling = PoolingLayer(pad_index)
         self.norm = nn.LayerNorm(embeding_dim)
-        self.drop = nn.Dropout(0.3)
+        self.drop = nn.Dropout(0.25)
         self.lin = nn.Linear(embeding_dim, 1)
+        
     def forward(self, x):
+        res_x = x
         self.input_ids = x
         word_emb = self.emb(x)
         positions = torch.arange(0, x.size(1)).to(x.device)
         pos_x = self.pos_emb(positions)
 
         x = word_emb + pos_x
-        x1 = self.attention(x, self.input_ids)
-        x1 = self.dropAttention(x1)
-        x1 = self.norm(x1)
-        x2 = self.attention2(x1, self.input_ids) + x1
-        x2 = self.norm(x2)
-        x2 = self.dropAttention(x2)
-        x3 = self.attention3(x2, self.input_ids) + x2
-        x3 = self.norm(x3)
-        x3 = self.dropAttention(x3)
-        x = self.pooling(x3, self.input_ids, type = 0)
-        x = self.norm(x)
-        x = self.drop(x)
-        x = self.lin(x)
+        x = self.attBlock1(x, self.input_ids)
+        x = self.attBlock2(x, self.input_ids)
+        #x = self.attBlock3(x, self.input_ids)
         
+        x = self.pooling(x, self.input_ids, type = 0)
+        x = self.norm(x)
+        #x = x + res_x
+        x = self.lin(x)
         return x
+
+        #x = word_emb
+        #x = word_emb + pos_x
+        #x1 = self.attention(x, self.input_ids)
+        #x1 = self.norm(x1)
+        #x1 = self.dropAttention(x1)
+        #x2 = self.attention2(x1, self.input_ids) + x1
+        #x2 = self.norm(x2)
+        #x2 = self.dropAttention(x2)
+        #x3 = self.attention3(x2, self.input_ids) + x2
+        #x3 = self.norm(x3)
+        #x3 = self.dropAttention(x3)
+        #x = self.pooling(x3, self.input_ids, type = 0)
+        #x = self.norm(x)
+        #x = self.drop(x)
+        #x = self.ff(x)
+        #x = self.lin(x)
+        #return x
         
 
 class LabelsIdsDataset(Dataset):
@@ -164,6 +219,7 @@ def prepareAmazonDataset():
             indexes += [index_pad] * padding_length
         elif len(indexes) > 256:
             indexes = indexes[0:256]
+        
         return indexes
     # Load and preprocess train data
     df_text = pd.read_csv('D:\\MyFiles\\Datasets\\AmazonReview\\amazon_review_polarity_csv\\train.csv')
@@ -180,14 +236,155 @@ def prepareAmazonDataset():
     df_text_splited["Subject"] = df_text_splited["Subject"].apply(clean_text)
     df_text_splited["Body"] = df_text_splited["Body"].apply(clean_text)
     gen = generate_token_spacy(df_text_splited["Subject"]+df_text_splited["Body"], tokenizer)
-    vocab = build_vocab_from_iterator(gen, specials=["<unk>", "<pad>"], max_tokens=30000)
+    vocab = build_vocab_from_iterator(gen, specials=["<unk>", "<pad>"], max_tokens=27000)
     vocab.set_default_index(vocab["<unk>"])
     index_pad = vocab["<pad>"]
     df_text_splited["review"] = df_text_splited["Subject"] + " " + df_text_splited["Body"]
     df_text_splited["input_ids"] = df_text_splited["review"].apply(pad_and_encode)
     df_text_splited = df_text_splited.reset_index(drop=True)
     return df_text_splited, vocab
+def prepareDataForImdbWordPeace():
+    
+    tokenizer = Tokenizer(WordPiece(unk_token="<unk>"))
+    tokenizer.pre_tokenizer = Whitespace()
 
+    def labelFix(dt):
+        if dt == 'positive':
+            return 1
+        else:
+            return 0
+
+    def remove_emojis(text):
+        """Удаляет эмодзи и специальные символы Unicode"""
+        emoji_pattern = re.compile("["
+                               u"\U0001F600-\U0001F64F"  # эмоции
+                               u"\U0001F300-\U0001F5FF"  # символы & пиктограммы
+                               u"\U0001F680-\U0001F6FF"  # транспорт & карты
+                               u"\U0001F1E0-\U0001F1FF"  # флаги
+                               u"\U00002702-\U000027B0"
+                               u"\U000024C2-\U0001F251"
+                               "]+", flags=re.UNICODE)
+        return emoji_pattern.sub(r'', text)
+
+    def remove_urls(text):
+        """Удаляет URL адреса"""
+        url_pattern = re.compile(r'https?://\S+|www\.\S+')
+        return url_pattern.sub(r'', text)
+
+    def remove_mentions_hashtags(text):
+        """Удаляет упоминания и хэштеги"""
+        cleaned = re.sub(r'[@#]\w+', '', text)
+        return cleaned
+
+    def removeHtmlTags(string):
+        s2 = re.sub(r"<.*?>", "", string)
+        return s2
+        
+
+    # Загрузка и предобработка данных
+    data = pd.read_csv('D:/MyFiles/Datasets/IMDB/IMDB Dataset.csv')
+    data.columns = ['review', 'label']
+    data['label'] = data['label'].apply(labelFix)
+    data['review'] = data['review'].apply(removeHtmlTags)
+    
+    #data['review'] = data['review'].apply(clean_text)
+    #data['review'] = data['review'].apply(simple_word_splitter)
+    
+    # Очистка текста
+    def comprehensive_text_cleaner(text):
+        if not isinstance(text, str):
+            return ""
+            
+        cleaned_text = text
+        cleaned_text = remove_urls(cleaned_text)
+        cleaned_text = remove_mentions_hashtags(cleaned_text)
+        cleaned_text = remove_emojis(cleaned_text)
+        cleaned_text = re.sub(r'[^a-zA-Zа-яА-ЯёЁ0-9\s\.\,\!\?\-\:\(\)\"]', '', cleaned_text)
+        cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
+        
+        return cleaned_text
+    
+    data['review'] = data['review'].apply(comprehensive_text_cleaner)
+    
+    # Обучение WordPiece токенизатора
+    def get_training_corpus():
+        for i in range(0, len(data), 1000):
+            yield data['review'][i:i+1000].tolist()
+    vocab_size = 25000
+    # Настройка тренера для WordPiece
+    trainer = WordPieceTrainer(
+        vocab_size=vocab_size,
+        special_tokens=["<unk>", "<pad>"]
+    )
+    
+    # Обучение токенизатора
+    
+    trainer = WordPieceTrainer(vocab_size=vocab_size, special_tokens=["<unk>", "<pad>"])
+    tokenizer.train_from_iterator(get_training_corpus(), trainer=trainer)
+    
+    # Получаем реальный vocab из токенизатора
+    vocab_dict = tokenizer.get_vocab()
+    print(f"Real vocab size from tokenizer: {len(vocab_dict)}")
+    
+    # Создаем mapping для индексов
+    class CustomVocab:
+        def __init__(self, tokenizer):
+            self.tokenizer = tokenizer
+            self.stoi = tokenizer.get_vocab()
+            self.itos = {v: k for k, v in self.stoi.items()}
+            self.specials = {"<unk>", "<pad>"}
+            
+        def __getitem__(self, token):
+            return self.stoi.get(token, self.stoi["<pad>"])
+            
+        def __len__(self):
+            return len(self.stoi)
+            
+        def get_stoi(self):
+            return self.stoi
+            
+        def get_itos(self):
+            return self.itos
+    
+    vocab = CustomVocab(tokenizer)
+    
+    # Функция для кодирования с проверкой
+    def pad_and_encode(text):
+        encoding = tokenizer.encode(text)
+        tokens = encoding.ids
+        
+        # ПРОВЕРЯЕМ индексы
+        max_valid_index = len(vocab.stoi) - 1
+        tokens = [min(token, max_valid_index) for token in tokens]
+        
+        # Обрезаем или дополняем до длины 256
+        if len(tokens) < 256:
+            padding_length = 256 - len(tokens)
+            tokens = tokens + [vocab.stoi["<pad>"]] * padding_length
+        elif len(tokens) > 256:
+            tokens = tokens[:256]
+            
+        return tokens
+    
+    data["input_ids"] = data["review"].apply(pad_and_encode)
+    
+    # ПРОВЕРКА ДАННЫХ
+    print("=== DATA VALIDATION ===")
+    print(f"Vocab size: {len(vocab)}")
+    
+    all_input_ids = [idx for sublist in data["input_ids"] for idx in sublist]
+    max_index = max(all_input_ids) if all_input_ids else 0
+    min_index = min(all_input_ids) if all_input_ids else 0
+    
+    print(f"Max index in data: {max_index}")
+    print(f"Min index in data: {min_index}")
+    print(f"Vocab size: {len(vocab)}")
+    
+    if max_index >= len(vocab):
+        invalid_count = sum(1 for idx in all_input_ids if idx >= len(vocab))
+        print(f"WARNING: {invalid_count} indices exceed vocab size!")
+    
+    return data, vocab
 def prepareDataForImdb():
     
     tokenizer = get_tokenizer("basic_english")
@@ -196,7 +393,28 @@ def prepareDataForImdb():
             return 1
         else:
             return 0
-    
+    def remove_emojis(text):
+        """Удаляет эмодзи и специальные символы Unicode"""
+        emoji_pattern = re.compile("["
+                               u"\U0001F600-\U0001F64F"  # эмоции
+                               u"\U0001F300-\U0001F5FF"  # символы & пиктограммы
+                               u"\U0001F680-\U0001F6FF"  # транспорт & карты
+                               u"\U0001F1E0-\U0001F1FF"  # флаги
+                               u"\U00002702-\U000027B0"
+                               u"\U000024C2-\U0001F251"
+                               "]+", flags=re.UNICODE)
+        return emoji_pattern.sub(r'', text)
+
+    def remove_urls(text):
+        """Удаляет URL адреса"""
+        url_pattern = re.compile(r'https?://\S+|www\.\S+')
+        return url_pattern.sub(r'', text)
+
+    def remove_mentions_hashtags(text):
+        """Удаляет упоминания и хэштеги"""
+        cleaned = re.sub(r'[@#]\w+', '', text)
+        return cleaned
+
     def removeHtmlTags(string):
         s2 = re.sub(r"<.*?>", "", string)
         return s2
@@ -209,6 +427,49 @@ def prepareDataForImdb():
         elif len(indexes) > 256:
             indexes = indexes[0:256]
         return indexes
+    def comprehensive_text_cleaner(text, 
+                             remove_urls_flag=True,
+                             remove_mentions_flag=True, 
+                             remove_emojis_flag=True,
+                             remove_special_chars_flag=True,
+                             normalize_spaces_flag=True):
+        """
+        Комплексная очистка текста с настройками
+        """
+        if not isinstance(text, str):
+            return ""
+
+        cleaned_text = text
+
+        if remove_urls_flag:
+            cleaned_text = remove_urls(cleaned_text)
+
+        if remove_mentions_flag:
+            cleaned_text = remove_mentions_hashtags(cleaned_text)
+
+        if remove_emojis_flag:
+            cleaned_text = remove_emojis(cleaned_text)
+
+        if remove_special_chars_flag:
+            # Сохраняем только буквы, цифры, пробелы и основную пунктуацию
+            cleaned_text = re.sub(r'[^a-zA-Zа-яА-ЯёЁ0-9\s\.\,\!\?\-\:\(\)\"]', '', cleaned_text)
+
+        if normalize_spaces_flag:
+            # Заменяем множественные пробелы на один
+            cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
+    
+        return cleaned_text
+    def clean_dataset_texts(df, text_column='review'):
+        """
+        Очищает тексты в датафрейме
+        """
+
+        # Базовая очистка
+        df['review'] = df[text_column].apply(
+            lambda x: comprehensive_text_cleaner(str(x)) if pd.notna(x) else ""
+        )       
+
+        return df
     def clean_text(text):
         text = re.sub(r'\s+', ' ', text).strip()
         text = re.sub(r'Aspect ratio:.*?(?=\n|$)', '', text)
@@ -219,6 +480,7 @@ def prepareDataForImdb():
     data['label'] = data['label'].apply(labelFix)
     data['review'] = data['review'].apply(removeHtmlTags)
     data['review'] = data['review'].apply(clean_text)
+    data = clean_dataset_texts(data)
     def removeHtmlTags(string):
         s2 = re.sub(r"<.*?>", "", string)
         return s2
@@ -231,7 +493,7 @@ def prepareDataForImdb():
     
     gen = gen_tokenizer(data['review'], tokenizer=tokenizer)
     
-    max_tokens = 25000
+    max_tokens = 28000
     vocab = build_vocab_from_iterator(gen, specials=['<unk>', '<pad>'], max_tokens=max_tokens)
     vocab.set_default_index(vocab["<unk>"])
     data["input_ids"] = data["review"].apply(pad_and_encode, index_pad=vocab["<pad>"])
@@ -248,10 +510,11 @@ def prepareDataForImdb():
     print("Index test :", vocab["13dfsdafsf"])
     return data, vocab
 runTrain = True
-dataset = "Amazon" #"IMDB"  #"Amazon"
+dataset = "IMDB" #"IMDB"  #"Amazon"
 
-data, vocab = (prepareDataForImdb() if dataset == "IMDB" else prepareAmazonDataset())
-
+data, vocab = (prepareDataForImdbWordPeace() if dataset == "IMDB" else prepareAmazonDataset())
+data['has_html'] = data['review'].str.contains(r'<[^>]+>', regex=True)
+print(data['has_html'].value_counts())
 print(data[data["label"] == 0].shape[0], "positive samples")
 data['lenStr'] = data['review'].apply(lambda x: len(x))
 
@@ -278,20 +541,32 @@ train_ = LabelsIdsDataset(train_["input_ids"].tolist(), train_["label"].tolist()
 test_dataloader = LabelsIdsDataset(test_["input_ids"].tolist(), test_["label"].tolist())
 valid_ = LabelsIdsDataset(valid_["input_ids"].tolist(), valid_["label"].tolist())#
 val_filter_first, val_filter_second = 300, 600 #
-train_dataloader = DataLoader(train_, batch_size=32, shuffle=True)
-test_dataloader = DataLoader(test_dataloader, batch_size=32, shuffle=False)
-valid_dataloader = DataLoader(valid_, batch_size=32, shuffle=True)#
+train_dataloader = DataLoader(train_, batch_size=32, shuffle=True, num_workers = 0, pin_memory=False,)
+test_dataloader = DataLoader(test_dataloader, batch_size=32, shuffle=False, num_workers = 0, pin_memory=False,)
+valid_dataloader = DataLoader(valid_, batch_size=32, shuffle=True, num_workers = 0, pin_memory=False,)#
 
 #setup training
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = TransformerClass(len(vocab), 256, vocab["<pad>"]).to(device)
 loss_func = torch.nn.BCEWithLogitsLoss()
 
-data['label'].value_counts()
+print("Using CPU for debugging")
 
+# Или добавьте проверку на GPU
+if torch.cuda.is_available():
+    device_ = torch.device("cuda")
+    # Проверьте первый батч
+    for inputs, labels in train_dataloader:
+        print(f"Input shape: {inputs.shape}")
+        print(f"Input max: {inputs.max()}, min: {inputs.min()}")
+        print(f"Vocab size: {len(vocab)}")
+        
+        if inputs.max() >= len(vocab):
+            print(f"ERROR: Input index {inputs.max()} >= vocab size {len(vocab)}")
+        break
 #learning_rate = 9e-4 most optimal for IMDB
-learning_rate = 8e-4
-optim = torch.optim.AdamW(model.parameters(), lr = learning_rate)
+learning_rate = 1e-4
+optim = torch.optim.AdamW(model.parameters(), lr = learning_rate, weight_decay=0.05)
 num_epochs = 12
 losses = []
 val_losses = []
@@ -299,12 +574,10 @@ corrects = []
 valid_result = []
 val_corrects = []
 val_loss, val_correct, val_total = 0.0, 0, 0
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optim, 'min', patience=3, factor=0.5)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optim, 'min', patience=4, factor=0.5)
 early_stopping = es(patience=3, min_delta=0.0001)
 val_acc_array = []
 
-print("Last layer bias:", model.lin.bias.item())
-print("Last layer weight mean:", model.lin.weight.mean().item())
 
 if(runTrain):
     for epoch in range(num_epochs):#
@@ -351,110 +624,107 @@ if(runTrain == False):
         model.load_state_dict(torch.load("multihead_transformer_Amazon_0.87.pth"))
     model.eval()#
 
-fineTuneFlag = False
-if(fineTuneFlag and runTrain == False):
-    print("Fine-tuning model...")
-    model.emb.weight.requires_grad = False
-    model.pos_emb.weight.requires_grad = False
-    model.attention.key.weight.requires_grad = False
-    model.attention.value.weight.requires_grad = False
-    model.attention.query.weight.requires_grad = False
-    #model.attention.norm.weight.requires_grad = False
-    data, vocab = prepareDataForImdb()
-    train_, test_ = train_test_split(data, test_size=0.3, random_state=45)
-    train_, valid_ = train_test_split(train_, test_size=0.2, random_state=32)
-    test_ = test_.reset_index(drop = True)
-    train_dataset = LabelsIdsDataset(train_["input_ids"].tolist(), train_["label"].tolist())
-    valid_dataset = LabelsIdsDataset(valid_["input_ids"].tolist(), valid_["label"].tolist())
-    test_dataset = LabelsIdsDataset(test_["input_ids"].tolist(), test_["label"].tolist())
-    train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-    valid_dataloader = DataLoader(valid_dataset, batch_size=32, shuffle=True)
-    test_dataloader = DataLoader(test_dataset, batch_size=32, shuffle=False)
-    learning_rate = 1e-4
-    optim = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr = learning_rate)
-    correct = 0 
-    total = 0
-    all_preds = []
-    accuracy = 0
-    all_pred_ids = []
-    all_labels = []
-    incorrect_vals = []
-    obj_for_debug = []
-    obj_for_right_pred = []
-    num_epochs = 3
-    for epoch in range(num_epochs):
-        for inputs, labels in train_dataloader:
-            inputs = inputs.to(device)
-            labels = labels.to(device).unsqueeze(1).float()
-            outputs = model(inputs)
-            loss = loss_func(outputs, labels)
-            loss.backward()
-            optim.step()
-            optim.zero_grad()
-            losses.append(loss.item())
-        print(f'epoch {epoch}, loss : {loss.item()}')
-
-        model.eval()
-        #validation loop
-        val_correct, val_total, val_loss = 0, 0, 0
-        with torch.no_grad():
-            for inputs_val, labels_val in valid_dataloader:
-                inputs_val = inputs_val.to(device)
-                labels_val = labels_val.to(device).unsqueeze(1).float()
-                output_val = model(inputs_val)
-                loss_val = loss_func(output_val, labels_val)
-                val_loss = loss_val
-                predicted = torch.sigmoid(output_val) > 0.5
-                val_correct += (predicted == labels_val).sum().item()
-                val_total += labels_val.size(0)
-                val_losses.append(val_loss)
-            val_corrects.append(val_correct)
-            val_acc = val_correct / val_total
-            print(f"Validation [{epoch+1}], val_loss : {val_loss}, val_correct : {val_correct}, Total {val_total}, Accuracy : {val_acc}")
-        #scheduler.step(val_loss)
-    #with torch.no_grad():
-    for batch_id, (input_ids, labels) in enumerate(test_dataloader):
-        input_ids, labels = input_ids.to(device), labels.to(device).unsqueeze(1).float()
-        output = model(input_ids)
-        predicted = torch.sigmoid(output) > 0.5
-
-        all_preds.append(predicted.cpu().numpy())
-        all_pred_ids.append(output)
-        all_labels.append(labels.detach().cpu().numpy())
-        example_start_idx = batch_id * test_dataloader.batch_size
-        labels_bool = labels.bool()
-        #for i in range(len(predicted)):
-        for i in range(len(predicted)):
-            globax_idx = example_start_idx + i
-            #obj_for_debug['indexes'].append(globax_idx)
-            if predicted[i] != labels_bool[i]:
-                text_Res = None
-                text = test_["review"][globax_idx]
-                if predicted[i] == True and labels_bool[i] == False :
-                  text_Res = "False Positive"
-                else :
-                  text_Res = "False Negative"
-                error_info = {
-                    "text" : text,
-                    "color_metric" : text_Res,
-                    "globalIdx" : globax_idx,
-                    "textLen" : len(text),
-                    "input_ids" : input_ids[i].cpu().numpy().tolist()
-                }
-                obj_for_debug.append(error_info)
-            else:
-                correct_info = {
-                    "globalIdx" : globax_idx,
-                    "input_ids" : input_ids[i].cpu().numpy().tolist()
-                }
-                obj_for_right_pred.append(correct_info)#
-        correct += (predicted == labels.bool()).sum().item()
-        total += labels.size(0)
-        accuracy = correct / total
-    print(f"Accuracy test {accuracy:.4f}")
-    print("Errors" , [error["text"] for error in obj_for_debug[0:5]])
-
-    model.save_state_dict(model.state_dict(), f"multihead_transformer_finetuned_Amazon_{accuracy:.2f}.pth")
+#fineTuneFlag = False
+#if(fineTuneFlag and runTrain == False):
+#    print("Fine-tuning model...")
+#    model.emb.weight.requires_grad = False
+#    model.pos_emb.weight.requires_grad = False
+#    model.attention.key.weight.requires_grad = False
+#    model.attention.value.weight.requires_grad = False
+#    model.attention.query.weight.requires_grad = False
+#    #model.attention.norm.weight.requires_grad = False
+#    data, vocab = prepareDataForImdb()
+#    train_, test_ = train_test_split(data, test_size=0.3, random_state=45)
+#    train_, valid_ = train_test_split(train_, test_size=0.2, random_state=32)
+#    test_ = test_.reset_index(drop = True)
+#    train_dataset = LabelsIdsDataset(train_["input_ids"].tolist(), train_["label"].tolist())
+#    valid_dataset = LabelsIdsDataset(valid_["input_ids"].tolist(), valid_["label"].tolist())
+#    test_dataset = LabelsIdsDataset(test_["input_ids"].tolist(), test_["label"].tolist())
+#    train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+#    valid_dataloader = DataLoader(valid_dataset, batch_size=32, shuffle=True)
+#    test_dataloader = DataLoader(test_dataset, batch_size=32, shuffle=False)
+#    learning_rate = 1e-4
+#    optim = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr = learning_rate)
+#    correct = 0 
+#    total = 0
+#    all_preds = []
+#    accuracy = 0
+#    all_pred_ids = []
+#    all_labels = []
+#    incorrect_vals = []
+#    obj_for_debug = []
+#    obj_for_right_pred = []
+#    num_epochs = 3
+#    for epoch in range(num_epochs):
+#        for inputs, labels in train_dataloader:
+#            inputs = inputs.to(device)
+#            labels = labels.to(device).unsqueeze(1).float()
+#            outputs = model(inputs)
+#            loss = loss_func(outputs, labels)
+#            loss.backward()
+#            optim.step()
+#            optim.zero_grad()
+#            losses.append(loss.item())
+#        print(f'epoch {epoch}, loss : {loss.item()}')
+#
+#        model.eval()
+#        #validation loop
+#        val_correct, val_total, val_loss = 0, 0, 0
+#        with torch.no_grad():
+#            for inputs_val, labels_val in valid_dataloader:
+#                inputs_val = inputs_val.to(device)
+#                labels_val = labels_val.to(device).unsqueeze(1).float()
+#                output_val = model(inputs_val)
+#                loss_val = loss_func(output_val, labels_val)
+#                val_loss = loss_val
+#                predicted = torch.sigmoid(output_val) > 0.5
+#                val_correct += (predicted == labels_val).sum().item()
+#                val_total += labels_val.size(0)
+#                val_losses.append(val_loss)
+#            val_corrects.append(val_correct)
+#            val_acc = val_correct / val_total
+#            print(f"Validation [{epoch+1}], val_loss : {val_loss}, val_correct : {val_correct}, Total {val_total}, Accuracy : {val_acc}")
+#    for batch_id, (input_ids, labels) in enumerate(test_dataloader):
+#        input_ids, labels = input_ids.to(device), labels.to(device).unsqueeze(1).float()
+#        output = model(input_ids)
+#        predicted = torch.sigmoid(output) > 0.5
+#
+#        all_preds.append(predicted.cpu().numpy())
+#        all_pred_ids.append(output)
+#        all_labels.append(labels.detach().cpu().numpy())
+#        example_start_idx = batch_id * test_dataloader.batch_size
+#        labels_bool = labels.bool()
+#        for i in range(len(predicted)):
+#            globax_idx = example_start_idx + i
+#            
+#            if predicted[i] != labels_bool[i]:
+#                text_Res = None
+#                text = test_["review"][globax_idx]
+#                if predicted[i] == True and labels_bool[i] == False :
+#                  text_Res = "False Positive"
+#                else :
+#                  text_Res = "False Negative"
+#                error_info = {
+#                    "text" : text,
+#                    "color_metric" : text_Res,
+#                    "globalIdx" : globax_idx,
+#                    "textLen" : len(text),
+#                    "input_ids" : input_ids[i].cpu().numpy().tolist()
+#                }
+#                obj_for_debug.append(error_info)
+#            else:
+#                correct_info = {
+#                    "globalIdx" : globax_idx,
+#                    "input_ids" : input_ids[i].cpu().numpy().tolist()
+#                }
+#                obj_for_right_pred.append(correct_info)#
+#        correct += (predicted == labels.bool()).sum().item()
+#        total += labels.size(0)
+#        accuracy = correct / total
+#    print(f"Accuracy test {accuracy:.4f}")
+#    print("Errors" , [error["text"] for error in obj_for_debug[0:5]])
+#
+#    model.save_state_dict(model.state_dict(), f"multihead_transformer_finetuned_Amazon_{accuracy:.2f}.pth")
 correct = 0 
 total = 0
 all_preds = []
@@ -591,7 +861,8 @@ show_roc_auc_graph(fpr, tpr)
 
 false_positives = [e for e in obj_for_debug if e["color_metric"] == "False Positive"]
 false_negatives = [e for e in obj_for_debug if e["color_metric"] == "False Negative"]
-print(f"False Positives: {len(false_negatives)}")
+print(f"False negatives: {len(false_negatives)}")
+print(f"False positives: {len(false_positives)}")
 
 for i in range(5):
     print(f"\n{i+1}. Текст: {false_negatives[i]['text'][:300]}")
@@ -632,7 +903,7 @@ for i in counter.items():
         frequent_tokens.append(debug_obj)
         counter_values.append(i[0])#
 
-import tools.vector_checking as vc
+import tools as vc
 tokens_weight = None
 with torch.no_grad():
     tokens_weight = model.emb.weight.data[counter_values].cpu().detach().numpy()
@@ -652,14 +923,14 @@ arr_items_pos = []
 counter_Ngrams = Counter(result_ngrams)
 counter_PosNrgams = Counter(result_ngrams_pos)
 for item in counter_Ngrams.most_common(20):
-    arr_items_neg.append({"ngram_text": vocab_itos[item[0][0]]+vocab_itos[item[0][1]]+vocab_itos[item[0][2]], "count": item[1], "color" : "red"})
+    arr_items_neg.append({"ngram_text": f'{vocab_itos[item[0][0]]} {vocab_itos[item[0][1]]} {vocab_itos[item[0][2]]}', "count": item[1], "color" : "red"})
 for item in counter_PosNrgams.most_common(20):
-    arr_items_pos.append({"ngram_text": vocab_itos[item[0][0]]+vocab_itos[item[0][1]]+vocab_itos[item[0][2]], "count": item[1], "color" : "green"})#
+    arr_items_pos.append({"ngram_text": f'{vocab_itos[item[0][0]]} {vocab_itos[item[0][1]]} {vocab_itos[item[0][2]]}', "count": item[1], "color" : "green"})#
 
 
 arr_temp = []
 arr_temp.extend(arr_items_neg)
-arr_temp.extend(arr_items_pos)#
+#arr_temp.extend(arr_items_pos)#
 
 ## print ngram bar plot#
 
@@ -766,11 +1037,11 @@ def debug_info_word_emb(vocab, model):#
 
 
 debug_info_word_emb(vocab, model)
-uncertrain = [i for i in obj_for_debug if i["uncertrain"] == True]
-
-print("Uncertrain cases:")
-for i in uncertrain:
-    print(i)
+#uncertrain = [i for i in obj_for_debug if i["uncertrain"] == True]
+#
+#print("Uncertrain cases:")
+#for i in uncertrain:
+#    print(i)
 
 
 tokens_spec = ["<unk>", '.', '<pad>', '\'', ',', '!']
@@ -794,6 +1065,16 @@ for i in range(1, len(weights_spec)):
     result = cosine(weights_spec[0], weights_spec[i])
     print("Cosine between <unk> and", tokens_spec[i], ":", result)
     arr_cos_spec.append(cosine(weights_spec[0], weights_spec[i]))
+
+
+import csv
+
+with open("result_csv.csv", 'w', newline='', encoding='utf-8') as csvfile:
+    csv_file_writer = csv.writer(csvfile)
+    for i in range(len(obj_for_debug)):
+        item = obj_for_debug[i]
+        result = [item["text"],item["color_metric"],item["textLen"]]
+        csv_file_writer.writerow(result) 
 
 
 if(runTrain):
