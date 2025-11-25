@@ -15,6 +15,7 @@ import math
 import json
 from sklearn.metrics import confusion_matrix
 import spacy
+#from torch_geometric.nn import SAGPooling
 from scipy.spatial.distance import cosine
 from sklearn.metrics import roc_curve, auc
 import torch.nn.functional as F
@@ -23,7 +24,7 @@ from tokenizers.models import WordPiece
 from tokenizers.trainers import WordPieceTrainer
 import os
 from tokenizers.pre_tokenizers import Whitespace
-
+from transformers import AdamW, get_linear_schedule_with_warmup
 
 from Earlystop import EarlyStopping as es
 class PoolingLayer(nn.Module):
@@ -46,7 +47,7 @@ class FFLayer(nn.Module):
         super().__init__()
         self.ff = nn.Sequential(
             nn.Linear(embeding, embeding*expansion),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Linear(embeding*expansion, embeding),
             nn.Dropout(0.2),
         )
@@ -103,29 +104,45 @@ class TransformerBlock(nn.Module):
         self.ff = FFLayer(size_kernel)
         self.drop = nn.Dropout(0.2)
     def forward(self, x, input_ids):
+        x = self.norm1(x)
         att_out = self.attention(x, input_ids)
-        x = self.norm1(x + self.drop(att_out))
-        ff_out = self.ff(x)
-        x = self.norm2(x + self.drop(ff_out))
+        x = x + self.drop(att_out)
+        x = self.norm2(x)
+        res_x = x
+        x = self.ff(x) + res_x
+        x = self.drop(x)
         return x
     
+class AttentionPooling(nn.Module):
+    def __init__(self, embed_dim):
+        super().__init__()
+        self.attention = nn.Linear(embed_dim, 1)
 
+    def forward(self, x, mask=None):
+        # x: [Batch, Seq, Dim]
+        # scores: [Batch, Seq, 1]
+        scores = self.attention(x)
+        
+        if mask is not None:
+            # mask: [Batch, Seq] (True там, где паддинг)
+            scores = scores.masked_fill(mask.unsqueeze(-1), -1e9)
+        
+        weights = torch.softmax(scores, dim=1)
+        # Сумма векторов, взвешенная их важностью
+        return torch.sum(x * weights, dim=1)
 class TransformerClass(nn.Module):
     def __init__(self, vocab_size, embeding_dim, pad_index):
         super().__init__()
         self.pad_index = pad_index
+        #vocab_size, emb_dim = pretrained_emb.shape
+        #self.emb = nn.Embedding(pretrained_emb, freeze = False, padding_idx = 0)
         self.emb = nn.Embedding(vocab_size, embeding_dim)
-        self.pos_emb = nn.Embedding(512, embeding_dim)
+        self.pos_emb = nn.Embedding(embeding_dim, embeding_dim)
         self.attBlock1 = TransformerBlock(embeding_dim, pad_index, 8)
         self.attBlock2 = TransformerBlock(embeding_dim, pad_index, 8)
-        #self.attBlock3 = TransformerBlock(embeding_dim, pad_index, 4)
-        
-        ##self.attention = MultiheadAttention(embeding_dim, pad_index, 4)
-        #self.dropAttention = nn.Dropout(0.2)
-        ##self.normAttention = nn.LayerNorm(embeding_dim)
-        #self.attention2 = MultiheadAttention(embeding_dim, pad_index, 4)
-        #self.attention3 = MultiheadAttention(embeding_dim, pad_index, 4)
-        self.pooling = PoolingLayer(pad_index)
+        #self.attBlock3 = TransformerBlock(embeding_dim, pad_index, 8)
+        self.pooling = nn.AdaptiveMaxPool1d(1)
+        #self.pooling = PoolingLayer(embeding_dim)
         self.norm = nn.LayerNorm(embeding_dim)
         self.drop = nn.Dropout(0.25)
         self.lin = nn.Linear(embeding_dim, 1)
@@ -135,36 +152,19 @@ class TransformerClass(nn.Module):
         self.input_ids = x
         word_emb = self.emb(x)
         positions = torch.arange(0, x.size(1)).to(x.device)
-        pos_x = self.pos_emb(positions)
-
+        pos_x = self.pos_emb(positions) 
+        mask = (self.input_ids != self.pad_index).unsqueeze(1).unsqueeze(2)
         x = word_emb + pos_x
         x = self.attBlock1(x, self.input_ids)
         x = self.attBlock2(x, self.input_ids)
-        #x = self.attBlock3(x, self.input_ids)
-        
-        x = self.pooling(x, self.input_ids, type = 0)
+        x = self.pooling(x)
+        #, self.input_ids, 1)
+        x = x.squeeze(2)
         x = self.norm(x)
-        #x = x + res_x
+        
+        x = self.drop(x)
         x = self.lin(x)
         return x
-
-        #x = word_emb
-        #x = word_emb + pos_x
-        #x1 = self.attention(x, self.input_ids)
-        #x1 = self.norm(x1)
-        #x1 = self.dropAttention(x1)
-        #x2 = self.attention2(x1, self.input_ids) + x1
-        #x2 = self.norm(x2)
-        #x2 = self.dropAttention(x2)
-        #x3 = self.attention3(x2, self.input_ids) + x2
-        #x3 = self.norm(x3)
-        #x3 = self.dropAttention(x3)
-        #x = self.pooling(x3, self.input_ids, type = 0)
-        #x = self.norm(x)
-        #x = self.drop(x)
-        #x = self.ff(x)
-        #x = self.lin(x)
-        #return x
         
 
 class LabelsIdsDataset(Dataset):
@@ -239,7 +239,7 @@ def prepareAmazonDataset():
     return df_text_splited, vocab
 def prepareDataForImdbWordPeace():
     
-    tokenizer = Tokenizer(WordPiece(unk_token="<unk>"))
+    tokenizer = Tokenizer(WordPiece(unk_token="<unk>", cls_token="<cls>"))
     tokenizer.pre_tokenizer = Whitespace()
 
     def labelFix(dt):
@@ -281,8 +281,6 @@ def prepareDataForImdbWordPeace():
     data['label'] = data['label'].apply(labelFix)
     data['review'] = data['review'].apply(removeHtmlTags)
     
-    #data['review'] = data['review'].apply(clean_text)
-    #data['review'] = data['review'].apply(simple_word_splitter)
     
     # Очистка текста
     def comprehensive_text_cleaner(text):
@@ -304,16 +302,16 @@ def prepareDataForImdbWordPeace():
     def get_training_corpus():
         for i in range(0, len(data), 1000):
             yield data['review'][i:i+1000].tolist()
-    vocab_size = 25000
+    vocab_size = 35000
     # Настройка тренера для WordPiece
     trainer = WordPieceTrainer(
         vocab_size=vocab_size,
-        special_tokens=["<unk>", "<pad>"]
+        special_tokens=["<unk>", "<pad>", "<cls>"]
     )
     
     # Обучение токенизатора
     
-    trainer = WordPieceTrainer(vocab_size=vocab_size, special_tokens=["<unk>", "<pad>"])
+    trainer = WordPieceTrainer(vocab_size=vocab_size, special_tokens=["<unk>", "<pad>", "<cls>"])
     tokenizer.train_from_iterator(get_training_corpus(), trainer=trainer)
     
     # Получаем реальный vocab из токенизатора
@@ -326,7 +324,7 @@ def prepareDataForImdbWordPeace():
             self.tokenizer = tokenizer
             self.stoi = tokenizer.get_vocab()
             self.itos = {v: k for k, v in self.stoi.items()}
-            self.specials = {"<unk>", "<pad>"}
+            self.specials = {"<unk>", "<pad>", "<cls>"}
             
         def __getitem__(self, token):
             return self.stoi.get(token, self.stoi["<pad>"])
@@ -346,19 +344,27 @@ def prepareDataForImdbWordPeace():
     def pad_and_encode(text):
         encoding = tokenizer.encode(text)
         tokens = encoding.ids
-        
-        # ПРОВЕРЯЕМ индексы
+
+        # Проверяем индексы
         max_valid_index = len(vocab.stoi) - 1
         tokens = [min(token, max_valid_index) for token in tokens]
-        
+
         # Обрезаем или дополняем до длины 256
         if len(tokens) < 256:
             padding_length = 256 - len(tokens)
             tokens = tokens + [vocab.stoi["<pad>"]] * padding_length
+            return tokens
         elif len(tokens) > 256:
-            tokens = tokens[:256]
-            
-        return tokens
+            # Берем первые 128 токенов
+            tokens_first_part = tokens[:128]
+            # Берем последние 128 токенов
+            tokens_second_part = tokens[-128:]
+            # Объединяем
+            tokens_first_part.extend(tokens_second_part)
+            return tokens_first_part
+        else:
+        # Если длина точно 256, возвращаем как есть
+            return tokens
     
     data["input_ids"] = data["review"].apply(pad_and_encode)
     
@@ -504,12 +510,11 @@ def prepareDataForImdb():
     print("Index test :", vocab["13dfsdafsf"])
     return data, vocab
 runTrain = True
-dataset = "IMDB" #"IMDB"  #"Amazon"
+dataset = "Amazon" #"IMDB"  #"Amazon"
 
 data, vocab = (prepareDataForImdbWordPeace() if dataset == "IMDB" else prepareAmazonDataset())
 data['has_html'] = data['review'].str.contains(r'<[^>]+>', regex=True)
-print(data['has_html'].value_counts())
-print(data[data["label"] == 0].shape[0], "positive samples")
+
 data['lenStr'] = data['review'].apply(lambda x: len(x))
 
 print(data['lenStr'].describe())
@@ -535,9 +540,9 @@ train_ = LabelsIdsDataset(train_["input_ids"].tolist(), train_["label"].tolist()
 test_dataloader = LabelsIdsDataset(test_["input_ids"].tolist(), test_["label"].tolist())
 valid_ = LabelsIdsDataset(valid_["input_ids"].tolist(), valid_["label"].tolist())#
 val_filter_first, val_filter_second = 300, 600 #
-train_dataloader = DataLoader(train_, batch_size=32, shuffle=True, num_workers = 0, pin_memory=False,)
-test_dataloader = DataLoader(test_dataloader, batch_size=32, shuffle=False, num_workers = 0, pin_memory=False,)
-valid_dataloader = DataLoader(valid_, batch_size=32, shuffle=True, num_workers = 0, pin_memory=False,)#
+train_dataloader = DataLoader(train_, batch_size=32, shuffle=True, num_workers = 0, pin_memory=False)
+test_dataloader = DataLoader(test_dataloader, batch_size=32, shuffle=False, num_workers = 0, pin_memory=False)
+valid_dataloader = DataLoader(valid_, batch_size=32, shuffle=True, num_workers = 0, pin_memory=False)#
 
 #setup training
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -545,31 +550,19 @@ model = TransformerClass(len(vocab), 256, vocab["<pad>"]).to(device)
 loss_func = torch.nn.BCEWithLogitsLoss()
 
 print("Using CPU for debugging")
-
-# Или добавьте проверку на GPU
-if torch.cuda.is_available():
-    device_ = torch.device("cuda")
-    # Проверьте первый батч
-    for inputs, labels in train_dataloader:
-        print(f"Input shape: {inputs.shape}")
-        print(f"Input max: {inputs.max()}, min: {inputs.min()}")
-        print(f"Vocab size: {len(vocab)}")
-        
-        if inputs.max() >= len(vocab):
-            print(f"ERROR: Input index {inputs.max()} >= vocab size {len(vocab)}")
-        break
 #learning_rate = 9e-4 most optimal for IMDB
-learning_rate = 1e-4
-optim = torch.optim.AdamW(model.parameters(), lr = learning_rate, weight_decay=0.05)
-num_epochs = 12
+learning_rate = 5e-4
+optim = torch.optim.AdamW(model.parameters(), lr = learning_rate)
+num_epochs = 20
 losses = []
 val_losses = []
 corrects = []
 valid_result = []
 val_corrects = []
 val_loss, val_correct, val_total = 0.0, 0, 0
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optim, 'min', patience=4, factor=0.5)
-early_stopping = es(patience=3, min_delta=0.0001)
+scheduler = get_linear_schedule_with_warmup(optim, num_warmup_steps=5, num_training_steps=20)
+#scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optim, 'min', patience=6, factor=0.5)
+early_stopping = es(patience=10, min_delta=0.0001)
 val_acc_array = []
 
 
@@ -608,7 +601,8 @@ if(runTrain):
                 model.load_state_dict(early_stopping.get_best_weights())
                 break
         print(f"Current LR: {optim.param_groups[0]['lr']}")
-        scheduler.step(val_loss)#
+        scheduler.step()
+        #scheduler.step(val_loss)#
 
 
 if(runTrain == False):
@@ -618,107 +612,7 @@ if(runTrain == False):
         model.load_state_dict(torch.load("multihead_transformer_Amazon_0.87.pth"))
     model.eval()#
 
-#fineTuneFlag = False
-#if(fineTuneFlag and runTrain == False):
-#    print("Fine-tuning model...")
-#    model.emb.weight.requires_grad = False
-#    model.pos_emb.weight.requires_grad = False
-#    model.attention.key.weight.requires_grad = False
-#    model.attention.value.weight.requires_grad = False
-#    model.attention.query.weight.requires_grad = False
-#    #model.attention.norm.weight.requires_grad = False
-#    data, vocab = prepareDataForImdb()
-#    train_, test_ = train_test_split(data, test_size=0.3, random_state=45)
-#    train_, valid_ = train_test_split(train_, test_size=0.2, random_state=32)
-#    test_ = test_.reset_index(drop = True)
-#    train_dataset = LabelsIdsDataset(train_["input_ids"].tolist(), train_["label"].tolist())
-#    valid_dataset = LabelsIdsDataset(valid_["input_ids"].tolist(), valid_["label"].tolist())
-#    test_dataset = LabelsIdsDataset(test_["input_ids"].tolist(), test_["label"].tolist())
-#    train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-#    valid_dataloader = DataLoader(valid_dataset, batch_size=32, shuffle=True)
-#    test_dataloader = DataLoader(test_dataset, batch_size=32, shuffle=False)
-#    learning_rate = 1e-4
-#    optim = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr = learning_rate)
-#    correct = 0 
-#    total = 0
-#    all_preds = []
-#    accuracy = 0
-#    all_pred_ids = []
-#    all_labels = []
-#    incorrect_vals = []
-#    obj_for_debug = []
-#    obj_for_right_pred = []
-#    num_epochs = 3
-#    for epoch in range(num_epochs):
-#        for inputs, labels in train_dataloader:
-#            inputs = inputs.to(device)
-#            labels = labels.to(device).unsqueeze(1).float()
-#            outputs = model(inputs)
-#            loss = loss_func(outputs, labels)
-#            loss.backward()
-#            optim.step()
-#            optim.zero_grad()
-#            losses.append(loss.item())
-#        print(f'epoch {epoch}, loss : {loss.item()}')
-#
-#        model.eval()
-#        #validation loop
-#        val_correct, val_total, val_loss = 0, 0, 0
-#        with torch.no_grad():
-#            for inputs_val, labels_val in valid_dataloader:
-#                inputs_val = inputs_val.to(device)
-#                labels_val = labels_val.to(device).unsqueeze(1).float()
-#                output_val = model(inputs_val)
-#                loss_val = loss_func(output_val, labels_val)
-#                val_loss = loss_val
-#                predicted = torch.sigmoid(output_val) > 0.5
-#                val_correct += (predicted == labels_val).sum().item()
-#                val_total += labels_val.size(0)
-#                val_losses.append(val_loss)
-#            val_corrects.append(val_correct)
-#            val_acc = val_correct / val_total
-#            print(f"Validation [{epoch+1}], val_loss : {val_loss}, val_correct : {val_correct}, Total {val_total}, Accuracy : {val_acc}")
-#    for batch_id, (input_ids, labels) in enumerate(test_dataloader):
-#        input_ids, labels = input_ids.to(device), labels.to(device).unsqueeze(1).float()
-#        output = model(input_ids)
-#        predicted = torch.sigmoid(output) > 0.5
-#
-#        all_preds.append(predicted.cpu().numpy())
-#        all_pred_ids.append(output)
-#        all_labels.append(labels.detach().cpu().numpy())
-#        example_start_idx = batch_id * test_dataloader.batch_size
-#        labels_bool = labels.bool()
-#        for i in range(len(predicted)):
-#            globax_idx = example_start_idx + i
-#            
-#            if predicted[i] != labels_bool[i]:
-#                text_Res = None
-#                text = test_["review"][globax_idx]
-#                if predicted[i] == True and labels_bool[i] == False :
-#                  text_Res = "False Positive"
-#                else :
-#                  text_Res = "False Negative"
-#                error_info = {
-#                    "text" : text,
-#                    "color_metric" : text_Res,
-#                    "globalIdx" : globax_idx,
-#                    "textLen" : len(text),
-#                    "input_ids" : input_ids[i].cpu().numpy().tolist()
-#                }
-#                obj_for_debug.append(error_info)
-#            else:
-#                correct_info = {
-#                    "globalIdx" : globax_idx,
-#                    "input_ids" : input_ids[i].cpu().numpy().tolist()
-#                }
-#                obj_for_right_pred.append(correct_info)#
-#        correct += (predicted == labels.bool()).sum().item()
-#        total += labels.size(0)
-#        accuracy = correct / total
-#    print(f"Accuracy test {accuracy:.4f}")
-#    print("Errors" , [error["text"] for error in obj_for_debug[0:5]])
-#
-#    model.save_state_dict(model.state_dict(), f"multihead_transformer_finetuned_Amazon_{accuracy:.2f}.pth")
+
 correct = 0 
 total = 0
 all_preds = []
@@ -782,6 +676,7 @@ all_probs_np = np.concatenate(all_probs)
 all_labels_np = np.concatenate(all_labels)
 all_probs_np_squeezed = np.concatenate(probs)
 all_labels_np_squeezed = np.concatenate(labels_probs)
+
 
 for threshold in [0.5, 0.55, 0.6, 0.65, 0.658]:
     predicted = all_probs_np_squeezed > threshold
@@ -897,7 +792,13 @@ for i in counter.items():
         frequent_tokens.append(debug_obj)
         counter_values.append(i[0])#
 
+import model_train_tools.DebuggerTools as db
 import tools as vc
+
+debug = db.TransformerDebugger(vocab=vocab, model=model)
+debug.build_word_emb_metrics(tokens_spec = ["<unk>", '.', '<pad>', '\'', ',', '!'],
+    token_words =['of', 'movie', 'good', 'great', 'like', 'story'])
+
 tokens_weight = None
 with torch.no_grad():
     tokens_weight = model.emb.weight.data[counter_values].cpu().detach().numpy()
@@ -924,9 +825,9 @@ for item in counter_PosNrgams.most_common(20):
 
 arr_temp = []
 arr_temp.extend(arr_items_neg)
-#arr_temp.extend(arr_items_pos)#
+arr_temp.extend(arr_items_pos)#
 
-## print ngram bar plot#
+
 
 fig, (ax1, ax2, ax3) = plt.subplots(3,figsize=(20, 20))
 plt.subplots_adjust(wspace=2, hspace=3)
@@ -943,64 +844,6 @@ recall = conf_mat[1][1] / (conf_mat[1][1] + conf_mat[1][0])#
 
 print(f"Precision: {precision:.4f}, Recall: {recall:.4f}")#
 
-#class Debugger:
-#    def __init__(self, vocab, model):
-#        self.vocab = vocab
-#        self.model = model
-#    def build(self):
-#        return self#
-#
-
-## Debuger builder for transformer model
-#class TransformerDebugger(Debugger):
-#    def __init__(self, vocab, model):
-#        super().__init__(vocab, model)
-#    def build_word_emb_metrics(self, tokens_spec, token_words):
-#        print("Debug info word embeddings.....")
-#        #tokens_spec = ["<unk>", '.', '<pad>', '\'', ',', '!']
-#        #token_words =['of', 'movie', 'good', 'great', 'like', 'story']
-#        weights_spec = []
-#        weights_word = []
-#        with torch.no_grad():
-#            for i in tokens_spec:
-#                weights_spec.append(self.model.emb.weight[vocab[i]].data.cpu().detach().numpy())
-#            for i in token_words:
-#                weights_word.append(self.model.emb.weight[vocab[i]].data.cpu().detach().numpy())
-#        arr_cos_words = []
-#        arr_cos_spec = []#
-
-#        for i in range(len(weights_word)):
-#            result = cosine(weights_spec[0], weights_word[i])
-#            print("Cosine between <unk> and", token_words[i], ":", result)
-#            arr_cos_words.append(cosine(weights_spec[0], weights_word[i]))
-#        for i in range(1, len(weights_spec)):
-#            result = cosine(weights_spec[0], weights_spec[i])
-#            print("Cosine between <unk> and", tokens_spec[i], ":", result)
-#            arr_cos_spec.append(cosine(weights_spec[0], weights_spec[i]))#
-
-#        print("Special tokens weights:", cosine(weights_spec[0], weights_word[0]))
-#        print("Special tokens weights:", cosine(weights_spec[0], weights_word[1]))#
-
-#        print("Norm of spec tok", torch.norm(torch.tensor(weights_spec[0])))
-#        print("Norm of of word", torch.norm(torch.tensor(weights_word[0])))#
-
-#        return self
-#    def build_conf_matrix(self, all_labels, all_preds):
-#        self.conf_matrix = confusion_matrix(np.concatenate(all_labels), np.concatenate(all_preds))
-#        return self
-#    def build_precision_recall(self):
-#        self.precision = self.conf_matrix[1][1] / (self.conf_matrix[1][1] + self.conf_matrix[0][1])
-#        self.recall = self.conf_matrix[1][1] / (self.conf_matrix[1][1] + self.conf_matrix[1][0])
-#        return self
-#    def build_ngrams_analysis(self, tokens_list, tokens_list_pos, n = 3):
-#        from collections import Counter
-#        from scipy.spatial.distance import cosine
-#        import tools.vector_checking as vc
-#        result_ngrams = vc.extract_nrgams(tokens_list, n = n)
-#        result_ngrams_pos = vc.extract_nrgams(tokens_list_pos, n = n)
-#        self.counter_Ngrams = Counter(result_ngrams)
-#        self.counter_PosNrgams = Counter(result_ngrams_pos)
-#        return self#
 
 def debug_info_word_emb(vocab, model):#
     print("Debug info word embeddings.....")
@@ -1072,5 +915,5 @@ with open("result_csv.csv", 'w', newline='', encoding='utf-8') as csvfile:
 
 
 if(runTrain):
-    torch.save(model.state_dict(), f"multihead_transformer_{dataset}_{accuracy:.2f}.pth")
+    torch.save(model.state_dict(), f"multihead_transformer_{dataset}_{accuracy:.4f}.pth")
 plt.show()
