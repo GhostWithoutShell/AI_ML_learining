@@ -87,5 +87,24 @@ Accuracy: 75.73%
 </p>
 
 
+##  🛠️ How to use
 
+~~~
+from noise_layers import WaterNoiseLayer, AphexNoiseLayer
+# Initialize model with custom noise
 
+# intensity=0.05 was found to be optimal for CIFAR-10
+
+self.drop1 = WaterNoiseLayer(intensity=0.05)
+
+# OR
+
+self.drop1 = AphexNoiseLayer(file_path="water.mp3", intensity=0.05)
+
+  
+
+# Use inside your forward pass (only works during model.train())
+
+x = self.drop1(x)
+
+~~~
