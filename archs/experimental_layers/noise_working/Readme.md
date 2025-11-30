@@ -88,6 +88,8 @@ Accuracy: 75.73%
   <img src="conf_mat_dropout.png" alt="Confusion Matrix" width="45%">
   <img src="loss_plot_water.png" alt="Confusion Matrix" width="45%">
   <img src="conf_mat_waterdropout.png" alt="Confusion Matrix" width="45%">
+  <img src="loss_plot_guassian.png" alt="Confusion Matrix" width="45%">
+  <img src="conf_mat_guassian.png" alt="Confusion Matrix" width="45%">
 </p>
 
 <p align="center">
