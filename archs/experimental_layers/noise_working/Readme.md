@@ -15,10 +15,14 @@ The experiment compares three approaches on the **CIFAR-10** dataset:
 
 My experiments show that **additive structured noise consistently outperforms standard Dropout** on this CNN architecture.
 
+
+
+
 | Method                     | Accuracy (Peak) | Precision | Recall | F1 Score | **Improvement vs Baseline** |
 | :------------------------- | :-------------- | :-------- | :----- | :------- | :-------------------------- |
 | **WaterDrop (Pink Noise)** | 75.73%          | 0.7604    | 0.7573 | 0.7565   | **+3.57%** 🚀               |
 | **AphexDrop (IDM)**        | 74.86%          | 0.7485    | 0.7486 | -        | +2.72%                      |
+| Gaussian (White Noise)     | 74.63%          | 0.7465    | 0.7463 | 0.7443   | +2.49%                      |
 | Standard Dropout           | 72.14%          | 0.7296    | 0.7214 | 0.7191   | —                           |
 
 
@@ -84,6 +88,11 @@ Accuracy: 75.73%
   <img src="conf_mat_dropout.png" alt="Confusion Matrix" width="45%">
   <img src="loss_plot_water.png" alt="Confusion Matrix" width="45%">
   <img src="conf_mat_waterdropout.png" alt="Confusion Matrix" width="45%">
+</p>
+
+<p align="center">
+  <img src="original_vs_noised_0.05.png" alt="Original vs noised 0.05" width="45%">
+  <img src="original_vs_noised_0.09.png" alt="Original vs noised 0.09" width="45%">
 </p>
 
 

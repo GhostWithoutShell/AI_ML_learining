@@ -9,6 +9,7 @@ import numpy as np
 from sklearn.metrics import roc_curve, auc
 
 from noise_layers import AphexNoiseLayer as ap
+from noise_layers import GaussianNoiseLayer as gn
 import random
 import os
 
@@ -43,14 +44,18 @@ class CIFAR10(nn.Module):
             self.drop1 = nn.Dropout(0.2)
             self.drop2 = nn.Dropout(0.2)
             self.drop3 = nn.Dropout(0.2)
-        else:
+        elif exprim_key == 2:
             print("Using Aphex Twin Noise Layer")
             
             dev = 'cuda' if torch.cuda.is_available() else 'cpu'
             self.drop1 = ap(file_path, intensity=0.05, device=dev)
             self.drop2 = ap(file_path, intensity=0.05, device=dev)
             self.drop3 = ap(file_path, intensity=0.05, device=dev)
-        
+        elif exprim_key == 3:
+            print("Using Gaussian Noise Layer")
+            self.drop1 = gn(intensity=0.1)
+            self.drop2 = gn(intensity=0.1)
+            self.drop3 = gn(intensity=0.1)
         self.norm1 = nn.BatchNorm2d(16)
         self.norm2 = nn.BatchNorm2d(32)
         self.norm3 = nn.BatchNorm2d(64)
@@ -113,8 +118,9 @@ print(f"Device: {device}")
 
 audio_file = "water.mp3" 
 
-# SWITCH : 1 = Dropout, 2 = AphexNoise
-model = CIFAR10(file_path=audio_file, exprim_key=2).to(device)
+
+# SWITCH : 1 = Dropout, 2 = AphexNoise, 3 = GaussianNoiseLayer
+model = CIFAR10(file_path=audio_file, exprim_key=3).to(device)
 
 criterion = torch.nn.CrossEntropyLoss()
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
