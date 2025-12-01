@@ -87,13 +87,13 @@ class MultiheadAttention(nn.Module):
 
         att_scores = att_scores.masked_fill(mask == 0, -1e9)
         att_scores = torch.softmax(att_scores, dim=-1)
-
+        self.last_scores = att_scores.detach().cpu()
 
         result = torch.matmul(att_scores, v)
         result = result.transpose(1, 2).contiguous()
         result = result.view(batch_size, seq_len, self.emb_dim)
         output = self.projection(result)
-        return output
+        return output#, att_scores
 
 class TransformerBlock(nn.Module):
     def __init__(self, size_kernel, pad_index, num_heads):
@@ -111,7 +111,7 @@ class TransformerBlock(nn.Module):
         res_x = x
         x = self.ff(x) + res_x
         x = self.drop(x)
-        return x
+        return x#, scores
     
 class AttentionPooling(nn.Module):
     def __init__(self, embed_dim):
@@ -134,15 +134,11 @@ class TransformerClass(nn.Module):
     def __init__(self, vocab_size, embeding_dim, pad_index):
         super().__init__()
         self.pad_index = pad_index
-        #vocab_size, emb_dim = pretrained_emb.shape
-        #self.emb = nn.Embedding(pretrained_emb, freeze = False, padding_idx = 0)
         self.emb = nn.Embedding(vocab_size, embeding_dim)
         self.pos_emb = nn.Embedding(embeding_dim, embeding_dim)
         self.attBlock1 = TransformerBlock(embeding_dim, pad_index, 8)
         self.attBlock2 = TransformerBlock(embeding_dim, pad_index, 8)
-        #self.attBlock3 = TransformerBlock(embeding_dim, pad_index, 8)
-        self.pooling = nn.AdaptiveMaxPool1d(1)
-        #self.pooling = PoolingLayer(embeding_dim)
+
         self.norm = nn.LayerNorm(embeding_dim)
         self.drop = nn.Dropout(0.25)
         self.lin = nn.Linear(embeding_dim, 1)
@@ -157,14 +153,15 @@ class TransformerClass(nn.Module):
         x = word_emb + pos_x
         x = self.attBlock1(x, self.input_ids)
         x = self.attBlock2(x, self.input_ids)
-        x = self.pooling(x)
-        #, self.input_ids, 1)
-        x = x.squeeze(2)
-        x = self.norm(x)
+        
+        cls_value = x[:,0,:]
+        x = self.norm(cls_value)
+        
+        
         
         x = self.drop(x)
         x = self.lin(x)
-        return x
+        return x #(scores1, scores2)
         
 
 class LabelsIdsDataset(Dataset):
@@ -189,7 +186,7 @@ class LabelSmoothingBCELoss(nn.Module):
 
 
 def prepareAmazonDataset():
-    tokenizer = get_tokenizer("basic_english")
+    #tokenizer = get_tokenizer("basic_english")
     def remove_emojis(text):
         return text.encode('ascii', 'ignore').decode('ascii')
 
@@ -215,6 +212,45 @@ def prepareAmazonDataset():
             indexes = indexes[0:256]
         
         return indexes
+    
+    def get_training_corpus():
+        for i in range(0, len(df_text_splited), 1000):
+            yield df_text_splited['review'][i:i+1000].tolist()
+    
+    
+    # Функция для кодирования с проверкой
+    def pad_and_encode(text):
+        encoding = tokenizer.encode(text)
+        tokens = encoding.ids
+
+        # Проверяем индексы
+        max_valid_index = len(vocab.stoi) - 1
+        tokens = [min(token, max_valid_index) for token in tokens]
+
+        # Обрезаем или дополняем до длины 256
+        if len(tokens) < 256:
+            padding_length = 256 - len(tokens)
+            tokens = tokens + [vocab.stoi["<pad>"]] * padding_length
+            return tokens
+        elif len(tokens) > 256:
+            # Берем первые 128 токенов
+            tokens_first_part = tokens[:128]
+            # Берем последние 128 токенов
+            tokens_second_part = tokens[-128:]
+            # Объединяем
+            tokens_first_part.extend(tokens_second_part)
+            return tokens_first_part
+        else:
+        # Если длина точно 256, возвращаем как есть
+            return tokens
+    
+    
+    
+    # ПРОВЕРКА ДАННЫХ
+    print("=== DATA VALIDATION ===")
+    #print(f"Vocab size: {len(vocab)}")
+    
+    
     # Load and preprocess train data
     df_text = pd.read_csv('D:\\MyFiles\\Datasets\\AmazonReview\\amazon_review_polarity_csv\\train.csv')
     df_text.columns = ["label", "Subject", "Body"]
@@ -229,17 +265,56 @@ def prepareAmazonDataset():
     df_text_splited["Body"] = df_text_splited["Body"].apply(removeHtmlTags)
     df_text_splited["Subject"] = df_text_splited["Subject"].apply(clean_text)
     df_text_splited["Body"] = df_text_splited["Body"].apply(clean_text)
-    gen = generate_token_spacy(df_text_splited["Subject"]+df_text_splited["Body"], tokenizer)
-    vocab = build_vocab_from_iterator(gen, specials=["<unk>", "<pad>"], max_tokens=27000)
-    vocab.set_default_index(vocab["<unk>"])
-    index_pad = vocab["<pad>"]
+    #gen = generate_token_spacy(df_text_splited["Subject"]+df_text_splited["Body"], tokenizer)
+    #vocab = build_vocab_from_iterator(gen, specials=["<unk>", "<pad>"], max_tokens=27000)
+    #vocab.set_default_index(vocab["<unk>"])
+    
     df_text_splited["review"] = df_text_splited["Subject"] + " " + df_text_splited["Body"]
+    vocab_size = 35000
+    trainer = WordPieceTrainer(vocab_size=vocab_size, special_tokens=["<unk>", "<pad>", "<cls>"])
+    tokenizer = Tokenizer(WordPiece(unk_token="<unk>", cls_token="<cls>"))
+    tokenizer.pre_tokenizer = Whitespace()
+    
+    
+    # Получаем реальный vocab из токенизатора
+    vocab_dict = tokenizer.get_vocab()
+    print(f"Real vocab size from tokenizer: {len(vocab_dict)}")
+    
+    # Создаем mapping для индексов
+    class CustomVocab:
+        def __init__(self, tokenizer):
+            self.tokenizer = tokenizer
+            self.stoi = tokenizer.get_vocab()
+            self.itos = {v: k for k, v in self.stoi.items()}
+            self.specials = {"<unk>", "<pad>", "<cls>"}
+            
+        def __getitem__(self, token):
+            return self.stoi.get(token, self.stoi["<pad>"])
+            
+        def __len__(self):
+            return len(self.stoi)
+            
+        def get_stoi(self):
+            return self.stoi
+            
+        def get_itos(self):
+            return self.itos
+    
+    
+    tokenizer.train_from_iterator(get_training_corpus(), trainer=trainer)
+    
+    vocab = CustomVocab(tokenizer)
+    index_pad = vocab["<pad>"]
     df_text_splited["input_ids"] = df_text_splited["review"].apply(pad_and_encode)
+    all_input_ids = [idx for sublist in df_text_splited["input_ids"] for idx in sublist]
+    max_index = max(all_input_ids) if all_input_ids else 0
+    min_index = min(all_input_ids) if all_input_ids else 0
+    #df_text_splited["input_ids"] = df_text_splited["review"].apply(pad_and_encode)
     df_text_splited = df_text_splited.reset_index(drop=True)
     return df_text_splited, vocab
 def prepareDataForImdbWordPeace():
     
-    tokenizer = Tokenizer(WordPiece(unk_token="<unk>", cls_token="<cls>"))
+    tokenizer = Tokenizer(WordPiece(unk_token="<unk>"))
     tokenizer.pre_tokenizer = Whitespace()
 
     def labelFix(dt):
@@ -302,7 +377,7 @@ def prepareDataForImdbWordPeace():
     def get_training_corpus():
         for i in range(0, len(data), 1000):
             yield data['review'][i:i+1000].tolist()
-    vocab_size = 35000
+    vocab_size = 32000
     # Настройка тренера для WordPiece
     trainer = WordPieceTrainer(
         vocab_size=vocab_size,
@@ -342,19 +417,19 @@ def prepareDataForImdbWordPeace():
     
     # Функция для кодирования с проверкой
     def pad_and_encode(text):
+        max_len = 256
         encoding = tokenizer.encode(text)
         tokens = encoding.ids
-
-        # Проверяем индексы
         max_valid_index = len(vocab.stoi) - 1
+        
         tokens = [min(token, max_valid_index) for token in tokens]
-
+        tokens.insert(0,vocab.stoi["<cls>"])
         # Обрезаем или дополняем до длины 256
-        if len(tokens) < 256:
-            padding_length = 256 - len(tokens)
+        if len(tokens) < max_len:
+            padding_length = max_len - len(tokens)
             tokens = tokens + [vocab.stoi["<pad>"]] * padding_length
             return tokens
-        elif len(tokens) > 256:
+        elif len(tokens) > max_len:
             # Берем первые 128 токенов
             tokens_first_part = tokens[:128]
             # Берем последние 128 токенов
@@ -363,11 +438,10 @@ def prepareDataForImdbWordPeace():
             tokens_first_part.extend(tokens_second_part)
             return tokens_first_part
         else:
-        # Если длина точно 256, возвращаем как есть
             return tokens
     
     data["input_ids"] = data["review"].apply(pad_and_encode)
-    
+    print(data["input_ids"].head())
     # ПРОВЕРКА ДАННЫХ
     print("=== DATA VALIDATION ===")
     print(f"Vocab size: {len(vocab)}")
@@ -379,12 +453,13 @@ def prepareDataForImdbWordPeace():
     print(f"Max index in data: {max_index}")
     print(f"Min index in data: {min_index}")
     print(f"Vocab size: {len(vocab)}")
-    
+    print(f"Cls token :", vocab.stoi["<cls>"])
+    print(data["input_ids"].head())
     if max_index >= len(vocab):
         invalid_count = sum(1 for idx in all_input_ids if idx >= len(vocab))
         print(f"WARNING: {invalid_count} indices exceed vocab size!")
     
-    return data, vocab
+    return data, vocab, tokenizer
 def prepareDataForImdb():
     
     tokenizer = get_tokenizer("basic_english")
@@ -510,9 +585,9 @@ def prepareDataForImdb():
     print("Index test :", vocab["13dfsdafsf"])
     return data, vocab
 runTrain = True
-dataset = "Amazon" #"IMDB"  #"Amazon"
+dataset = "IMDB" #"IMDB"  #"Amazon"
 
-data, vocab = (prepareDataForImdbWordPeace() if dataset == "IMDB" else prepareAmazonDataset())
+data, vocab, tokenizer = (prepareDataForImdbWordPeace() if dataset == "IMDB" else prepareAmazonDataset())
 data['has_html'] = data['review'].str.contains(r'<[^>]+>', regex=True)
 
 data['lenStr'] = data['review'].apply(lambda x: len(x))
@@ -540,9 +615,9 @@ train_ = LabelsIdsDataset(train_["input_ids"].tolist(), train_["label"].tolist()
 test_dataloader = LabelsIdsDataset(test_["input_ids"].tolist(), test_["label"].tolist())
 valid_ = LabelsIdsDataset(valid_["input_ids"].tolist(), valid_["label"].tolist())#
 val_filter_first, val_filter_second = 300, 600 #
-train_dataloader = DataLoader(train_, batch_size=32, shuffle=True, num_workers = 0, pin_memory=False)
-test_dataloader = DataLoader(test_dataloader, batch_size=32, shuffle=False, num_workers = 0, pin_memory=False)
-valid_dataloader = DataLoader(valid_, batch_size=32, shuffle=True, num_workers = 0, pin_memory=False)#
+train_dataloader = DataLoader(train_, batch_size=32, shuffle=True)
+test_dataloader = DataLoader(test_dataloader, batch_size=32, shuffle=False)
+valid_dataloader = DataLoader(valid_, batch_size=32, shuffle=True)#
 
 #setup training
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -551,18 +626,18 @@ loss_func = torch.nn.BCEWithLogitsLoss()
 
 print("Using CPU for debugging")
 #learning_rate = 9e-4 most optimal for IMDB
-learning_rate = 5e-4
+learning_rate = 6e-4
 optim = torch.optim.AdamW(model.parameters(), lr = learning_rate)
-num_epochs = 20
+num_epochs = 15
 losses = []
 val_losses = []
 corrects = []
 valid_result = []
 val_corrects = []
 val_loss, val_correct, val_total = 0.0, 0, 0
-scheduler = get_linear_schedule_with_warmup(optim, num_warmup_steps=5, num_training_steps=20)
+scheduler = get_linear_schedule_with_warmup(optim, num_warmup_steps=4, num_training_steps=15)
 #scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optim, 'min', patience=6, factor=0.5)
-early_stopping = es(patience=10, min_delta=0.0001)
+early_stopping = es(patience=6, min_delta=0.0001)
 val_acc_array = []
 
 
@@ -591,7 +666,7 @@ if(runTrain):
                 predicted = torch.sigmoid(output_val) > 0.5
                 val_correct += (predicted == labels_val).sum().item()
                 val_total += labels_val.size(0)
-                val_losses.append(val_loss.detach().cpu().numpy())
+                val_losses.append(val_loss.item())
             val_corrects.append(val_correct)
             val_acc = val_correct / val_total
             val_acc_array.append(val_acc)
@@ -602,15 +677,16 @@ if(runTrain):
                 break
         print(f"Current LR: {optim.param_groups[0]['lr']}")
         scheduler.step()
-        #scheduler.step(val_loss)#
+        
 
 
 if(runTrain == False):
     if dataset == "IMDB":
-        model.load_state_dict(torch.load("multihead_transformer_IMDB_0.84.pth"))
+        model.load_state_dict(torch.load("multihead_transformer_IMDB_0.8607.pth", map_location="cpu"))
+        model.to(device)
     else:
-        model.load_state_dict(torch.load("multihead_transformer_Amazon_0.87.pth"))
-    model.eval()#
+        checkpoint = torch.load("multihead_transformer_Amazon_0.87.pth", map_location=torch.device('cpu'))
+    model.eval()
 
 
 correct = 0 
@@ -658,6 +734,8 @@ with torch.no_grad():
                     "textLen" : len(text),
                     "input_ids" : input_ids[i].cpu().numpy().tolist(),
                     "uncertain" : True if abs(torch.sigmoid(output[i]) - 0.5) < 0.1 else False
+                    #"score_1sthead" : scores[0][i].cpu().numpy().tolist(),
+                    #"score_2ndhead" : scores[1][i].cpu().numpy().tolist()
                 }
                 obj_for_debug.append(error_info)
             else:
@@ -670,13 +748,131 @@ with torch.no_grad():
         total += labels.size(0)
         accuracy = correct / total
     print(f"Accuracy test {accuracy:.4f}")
-print(len(obj_for_debug))#
+print(len(obj_for_debug))
+
+
+
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+def highlight_attention_html(model, text, vocab, tokenizer, device, class_label, head_idx=6):
+    """
+    head_idx: индекс головы (0-7). Ты сказал, что 7-я (индекс 6) самая интересная.
+    """
+    #model.eval()
+    def pad_and_encode(text):
+        max_len = 256
+        encoding = tokenizer.encode(text)
+        #print(type(encoding))
+        tokens = encoding.ids
+        #print("Cls" , [vocab.stoi["<cls>"]])
+        #print(tokens)
+        # Проверяем индексы
+        max_valid_index = len(vocab.stoi) - 1
+        
+        tokens = [min(token, max_valid_index) for token in tokens]
+        tokens.insert(0,vocab.stoi["<cls>"])
+        # Обрезаем или дополняем до длины 256
+        if len(tokens) < max_len:
+            padding_length = max_len - len(tokens)
+            tokens = tokens + [vocab.stoi["<pad>"]] * padding_length
+            return tokens
+        elif len(tokens) > max_len:
+            # Берем первые 128 токенов
+            tokens_first_part = tokens[:128]
+            # Берем последние 128 токенов
+            tokens_second_part = tokens[-128:]
+            # Объединяем
+            tokens_first_part.extend(tokens_second_part)
+            return tokens_first_part
+        else:
+            return tokens
+    # 1. Подготовка (как раньше)
+    tokens_ids = pad_and_encode(text)
+    # Обрезаем паддинги сразу, чтобы не рисовать их
+    if vocab["<pad>"] in tokens_ids:
+        real_len = tokens_ids.index(vocab["<pad>"])
+        tokens_ids = tokens_ids[:real_len]
+    else:
+        real_len = len(tokens_ids)
+        
+    input_tensor = torch.tensor([tokens_ids], dtype=torch.long).to(device)
+    
+    # 2. Прогон (Хук или self-storage должен быть уже активирован)
+    with torch.no_grad():
+        _ = model(input_tensor)
+        
+    # Достаем скоры: [Batch, Heads, Seq, Seq]
+    # model.attBlock2.attention.last_attention_scores
+    scores = model.attBlock2.attention.last_scores[0] # [8, Seq, Seq]
+    
+    # 3. Фокусируемся на CLS токене (строка 0)
+    # Нас интересует, как CLS (индекс 0) смотрит на все остальные слова (ось 1)
+    cls_attention = scores[head_idx, 0, :real_len].numpy()
+    
+    # Нормализуем веса для яркости цвета (чтобы максимум был ярко-красным)
+    # Можно использовать softmax или просто min-max
+    cls_attention = (cls_attention - cls_attention.min()) / (cls_attention.max() - cls_attention.min() + 1e-9)
+    
+    # Декодируем слова
+    itos = vocab.get_itos()
+    tokens = [itos[tid] for tid in tokens_ids]
+    
+    # 4. Генерируем HTML
+    html_content = f"<h3>Attention Map (Head {head_idx+1})</h3>"
+    html_content += f"<p><b>Review Score:</b> {torch.sigmoid(model(input_tensor)[0]).item():.4f}</p>"
+    html_content += '<div style="border:1px solid #ccc; padding: 10px; line-height: 2.0; font-family: sans-serif;">'
+    
+    for word, weight in zip(tokens, cls_attention):
+        # Цвет: Красный с прозрачностью (alpha) равной весу внимания
+        # Чем важнее слово, тем насыщеннее фон
+        alpha = weight * 0.8 + 0.1 # чуть сдвигаем, чтобы совсем бледные тоже было видно
+        html_content += f'<span style="background-color: rgba(255, 0, 0, {alpha:.2f}); padding: 2px; margin: 1px; border-radius: 3px;">{word}</span> '
+        
+    html_content += '</div>'
+    html_content += f"</br>"
+
+    return html_content
+
+
+def highlight_attention_html_heads(model, text_sample, vocab, tokenizer, device, class_, count_heads):
+    filename = f"attention_{class_}.html"
+    with open(filename, "w", encoding="utf-8") as f:
+        for i in range(count_heads):
+            html_content = highlight_attention_html(model, text_sample, vocab, tokenizer, device, class_, head_idx=i)
+            f.write(html_content)
+
+# === ЗАПУСК ===
+text_sample = "this movie was terrible acting was bad but the music was nice" 
+text_sample_pos = data[data["label"] == 1]["review"].iloc[5]
+
+
+
+highlight_attention_html_heads(model, text_sample, vocab, tokenizer, device, "negative", count_heads=8)
+highlight_attention_html_heads(model, text_sample_pos, vocab, tokenizer, device, "positive", count_heads=8)
+
+
+
+# Смотрим 7-ю голову (индекс 6), которая тебе понравилась
+#highlight_attention_html(model, text_sample, vocab, tokenizer, device, "negative", head_idx=6)#
+
+## Смотрим 3-ю голову (индекс 2), которая "странная"
+#highlight_attention_html(model, text_sample, vocab, tokenizer, device, "negative", head_idx=2)
+#highlight_attention_html(model, text_sample_pos, vocab, tokenizer, device, "positive", head_idx=6)
+#highlight_attention_html(model, text_sample_pos, vocab, tokenizer, device, "positive", head_idx=2)
 
 all_probs_np = np.concatenate(all_probs)
 all_labels_np = np.concatenate(all_labels)
 all_probs_np_squeezed = np.concatenate(probs)
 all_labels_np_squeezed = np.concatenate(labels_probs)
 
+if(runTrain):
+    torch.save(model.state_dict(), f"multihead_transformer_{dataset}_{accuracy:.4f}.pth")
 
 for threshold in [0.5, 0.55, 0.6, 0.65, 0.658]:
     predicted = all_probs_np_squeezed > threshold
@@ -817,15 +1013,16 @@ arr_items_pos = []
 
 counter_Ngrams = Counter(result_ngrams)
 counter_PosNrgams = Counter(result_ngrams_pos)
-for item in counter_Ngrams.most_common(20):
+for item in counter_Ngrams.most_common(10):
     arr_items_neg.append({"ngram_text": f'{vocab_itos[item[0][0]]} {vocab_itos[item[0][1]]} {vocab_itos[item[0][2]]}', "count": item[1], "color" : "red"})
-for item in counter_PosNrgams.most_common(20):
+for item in counter_PosNrgams.most_common(10):
     arr_items_pos.append({"ngram_text": f'{vocab_itos[item[0][0]]} {vocab_itos[item[0][1]]} {vocab_itos[item[0][2]]}', "count": item[1], "color" : "green"})#
 
 
 arr_temp = []
 arr_temp.extend(arr_items_neg)
 arr_temp.extend(arr_items_pos)#
+
 
 
 
@@ -914,6 +1111,5 @@ with open("result_csv.csv", 'w', newline='', encoding='utf-8') as csvfile:
         csv_file_writer.writerow(result) 
 
 
-if(runTrain):
-    torch.save(model.state_dict(), f"multihead_transformer_{dataset}_{accuracy:.4f}.pth")
+
 plt.show()
