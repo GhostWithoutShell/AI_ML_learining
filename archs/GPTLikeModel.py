@@ -46,16 +46,14 @@ class AttentionLayer(nn.Module):
 class FeedForward(nn.Module):
     def __init__(self, size_kernel, expansion=4):
         super().__init__()
-        self.lin = nn.Linear(size_kernel*expansion, size_kernel)
-        self.lin1 = nn.Linear(size_kernel, size_kernel*expansion)
-        self.relu = nn.ReLU()
-        self.norm = nn.LayerNorm(size_kernel)
-        self.dropout = nn.Dropout(0.3)
+        self.layers = nn.Sequential(
+            nn.Linear(size_kernel, size_kernel*expansion),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(size_kernel*expansion, size_kernel)
+        )
     def forward(self, x):
-        x = self.lin(x)
-        x = self.norm(self.dropout(x))
-        x = self.relu(x)
-        x = self.lin1(x)
+        x = self.layers(x)
         return x
 
 class AttentionBlock(nn.Module):
@@ -69,10 +67,11 @@ class AttentionBlock(nn.Module):
         self.ff = FeedForward(size_kernel=size_kernel)
 
     def forward(self, x, input_ids):
-        
-        x_att = self.attention(x, input_ids)
-        x = self.norm(self.dropout(x_att)) + x
-        x = self.ff(x)
+        x_norm = self.norm(x)
+        x_att = self.attention(x_norm, input_ids)
+        x = self.dropout(x_att) + x
+        x_out = self.ff(x)
+        x = self.dropout(x_out) + x
         return x
     
 
@@ -83,21 +82,21 @@ class GPTLikeModel(nn.Module):
         self.embedding = nn.Embedding(vocab_size, size_kernel, padding_idx=pad_index)
         self.pos_emb = nn.Embedding(512, size_kernel)
         self.norm = nn.LayerNorm(size_kernel)
-        self.attention_blocks = AttentionBlock(size_kernel, num_heads, pad_index)
-        self.attention_blocks1 = AttentionBlock(size_kernel, num_heads, pad_index)
-        self.attention_blocks2 = AttentionBlock(size_kernel, num_heads, pad_index)
-        
+        self.attention_blocks = nn.ModuleList({
+            AttentionBlock(size_kernel, num_heads, pad_index) for _ in range(num_layers)
+        })        
         self.drop = nn.Dropout(0.2)
-        self.fc_out = nn.Linear(size_kernel, vocab_size)
+        self.fc_out = nn.Linear(size_kernel, vocab_size, bias=False)
+        self.embedding.weight.data =self.embedding.weight
+        
     def forward(self, input_ids):
         batch_size, seq_len = input_ids.size()
         positions = torch.arange(0, seq_len).unsqueeze(0).expand(batch_size, seq_len).to(input_ids.device)
         self.embedding.weight = self.fc_out.weight
         x = self.embedding(input_ids) + self.pos_emb(positions)
         x = self.norm(x)
-        x = self.attention_blocks(x, input_ids)
-        x = self.attention_blocks1(x, input_ids)
-        x = self.attention_blocks2(x, input_ids)
+        for block in self.attention_blocks:
+            x = block(x, input_ids)
         logits = self.fc_out(self.drop(x))
         return logits
     
