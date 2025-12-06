@@ -28,7 +28,6 @@ class DataBuilderImdb(DataBulder):
         return data
     def applyLabelFix(self, data, parameters):
         column = parameters["labelsColumn"]
-        print("Col" ,column)
         data[column] = data[column].apply(self._labelFix)
         return data
 
@@ -105,7 +104,7 @@ class TokenizatorProcessingWordPeace(TokenizatorProcessing):
         self.vocab_size = vocab_size
         self.special_tokens = special_tokens
         self.__prepareTokenizator()
-    def __prepareTokenizator(self, tokenizator_name):
+    def __prepareTokenizator(self):
         self.tokenizer = Tokenizer(WordPiece(unk_token="<unk>"))
         self.tokenizer.pre_tokenizer = Whitespace()
         self.trainer = WordPieceTrainer(vocab_size=self.vocab_size, special_tokens=self.special_tokens)
@@ -114,20 +113,25 @@ class TokenizatorProcessingWordPeace(TokenizatorProcessing):
         for i in range(0, len_text, 1000):
             yield dt[column_with_text][i:i+1000].tolist()
     
-    def getData(self, tokenizator_name):
+    def getData(self, text):
         pass
-    def padAndEncode(self, text, use_slice = False):
+    def padAndEncode(self, text, vocab , use_first_and_second_part = False):
         encoded = self.tokenizer.encode(text)
         token_ids = encoded.ids
-        if use_slice:
+        max_valid_index = len(vocab.stoi) - 1
+        
+        token_ids = [min(token, max_valid_index) for token in token_ids]
+        if len(token_ids) > self.max_length:
             token_ids = token_ids[:self.max_length]
-        else:
+        elif len(token_ids) < self.max_length:
+            padding_length = self.max_length - len(token_ids)
+            token_ids = token_ids + [vocab.get_stoi()["<pad>"]] * padding_length
+        if use_first_and_second_part:
             first_part = token_ids[:self.max_length//2]
             second_part = token_ids[self.max_length//2:]
             token_ids = first_part + second_part
-        padding_length = self.max_length - len(token_ids)
-        if padding_length > 0:
-            token_ids += [0] * padding_length
+        else:
+            pass
         return token_ids
     def prepareVocab(self, dt, column_with_text):
         len_text = len(dt)

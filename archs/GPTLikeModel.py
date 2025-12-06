@@ -4,7 +4,10 @@ import numpy as np
 import re
 import torch
 import math
-from model_train_tools import DataBuilderImdb
+import model_train_tools.DataProcessor as dp
+from sklearn.model_selection import train_test_split
+from torch.utils.data import Dataset, DataLoader
+torch.backends.cudnn.benchmark = True
 
 class AttentionLayer(nn.Module):
     def __init__(self, size_kernel, num_heads, pad_index):
@@ -28,7 +31,10 @@ class AttentionLayer(nn.Module):
         x_q = x_q.view(batch_size, seq_len, self.num_heads, self.head_dim)
         x_v_tr = x_v.transpose(1,2)
         x_q_tr = x_q.transpose(1,2)
-        scores = torch.matmul(x_q_tr, x_k.transpose(-1,-2))
+        x_k_tr = x_k.transpose(1,2)
+        #print(x_q_tr.shape)
+        #print(x_k_tr.transpose(-1,-2).shape)
+        scores = torch.matmul(x_q_tr, x_k_tr.transpose(-1,-2))
         # mask
         padding_mask = (input_ids != self.pad_index).unsqueeze(1).unsqueeze(2)
         tri_mask = torch.tril(torch.ones((seq_len, seq_len), device=x.device)).unsqueeze(0).unsqueeze(0).bool()
@@ -69,6 +75,7 @@ class AttentionBlock(nn.Module):
 
     def forward(self, x, input_ids):
         x_norm = self.norm(x)
+        #print(x_norm.shape)
         x_att = self.attention(x_norm, input_ids)
         x = self.dropout(x_att) + x
         x_out = self.ff(x)
@@ -101,9 +108,31 @@ class GPTLikeModel(nn.Module):
         return logits
     
 
+class GptLikeDataset(Dataset):
+    def __init__(self, input_ids):
+        self.input_ids = input_ids
+    def __len__(self):
+        return len(self.input_ids)
+    def __getitem__(self, idx):
+        return torch.tensor(self.input_ids[idx], dtype=torch.long)
+
+
+
+def train_step(optim, criterion, model, input_ids, vocab_size):
+    train_input = input_ids[:, :-1]
+    train_targets = input_ids[:, 1:]
+    outputs = model(train_input)
+    outputs = outputs.reshape(-1, vocab_size)
+    train_targets = train_targets.reshape(-1)
+    loss = criterion(outputs, train_targets)
+    loss.backward()
+    optim.step()
+    optim.zero_grad()
+    return loss.item()
+
 ## train_input = input_ids[:, :-1]
 ## train_targets = input_ids[:, 1:]
-dt = DataBuilderImdb()
+dt = dp.DataBuilderImdb()
 data = dt.getDataFromCsv("D:\MyFiles\Datasets\IMDB\IMDB Dataset.csv")
 params = {
     "textsColumn": "review",
@@ -113,13 +142,146 @@ data = dt.cleanTextFromTrash(data, params)
 data = dt.applyLabelFix(data, params)
 print(data.head())
 
-num_epochs = 10
-batch_size = 32
+num_epochs = 2
+batch_size = 16
 learning_rate = 0.001
-vocab_size = 30000
+vocab_size = 8000
+
+
+tokenizerWrap = dp.TokenizatorProcessingWordPeace(max_length=256, special_tokens=["<unk>", "<pad>"], vocab_size=vocab_size)
+vocab = tokenizerWrap.prepareVocab(data, column_with_text="review")
+data["input_ids"] = data["review"].apply(lambda x: tokenizerWrap.padAndEncode(x, vocab=vocab, use_first_and_second_part=False))
+data.columns = ['review', 'labels', 'input_ids']
+train, test = train_test_split(data, test_size=0.2, random_state=42)
+
+train_dataset = GptLikeDataset(train["input_ids"].tolist())
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+test_dataset = GptLikeDataset(test["input_ids"].tolist())
+test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+
+
+import time
+
+
+print(data.head())  
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+pad_index = vocab.get_stoi()["<pad>"]
+model = GPTLikeModel(vocab_size=vocab_size, size_kernel=256, num_heads=8, num_layers=3, pad_index=pad_index).to(device)
+
+print(len(data["input_ids"].iloc[0]))
+
+optim = torch.optim.AdamW(model.parameters(), lr= learning_rate)
+criterion = torch.nn.CrossEntropyLoss(ignore_index=pad_index)
+losses = 0
+loss_values = []
+start = time.time()
+print("#### START TRAIN LOOP")
+for epoch in range(num_epochs):
+    model.train()
+    losses = 0
+    for input_ids in train_loader:
+        input_ids = input_ids.to(device)
+
+        train_trargets = input_ids[:, 1:]
+        train_input = input_ids[:, :-1]
+        optim.zero_grad()
+        outputs = model(train_input)
+        outputs = outputs.reshape(-1, len(vocab.get_itos()))
+        train_trargets = train_trargets.reshape(-1)
+
+        loss = criterion(outputs, train_trargets)
+
+        loss += losses
+
+        loss.backward()
+        optim.step()
+
+        
+
+    avg_loss = losses / len(train_loader)
+
+    model.eval()
+    total_val_losses = 0
+    correct_tokens = 0
+    total_tokens = 0
+    with torch.no_grad():
+        for input_ids_val in test_loader:
+            input_ids_val = input_ids_val.to(device)
+            test_targets = input_ids_val[:, 1:]
+            test_input = input_ids_val[:, :-1]
+
+            outputs = model(test_input)
+
+            #outputs = outputs.reshape(-1, len(vocab.get_itos()))
+            #test_targets = test_targets.reshape(-1)
+
+            loss = criterion(outputs.reshape(-1, len(vocab.get_itos())), test_targets.reshape(-1))
+
+            total_val_losses += loss.item()
+            prediction = torch.argmax(outputs, dim=-1)
+            mask = (test_targets != pad_index)
+
+            correct = (prediction == test_targets) & mask
+            correct_tokens += correct.sum().item()
+            total_tokens += mask.sum().item()
+
+        avg_val_loss = total_val_losses / len(test_loader)
+        val_accuracy = correct_tokens / total_tokens if total_tokens > 0 else 0.0000
+
+        print(f'Epoch {epoch+1} | Val avg loss {avg_val_loss:.4f} | Val acc {val_accuracy:.4f}')
 
 
 
-model = GPTLikeModel(vocab_size=vocab_size, size_kernel=256, num_heads=8, num_layers=3, pad_index=0)
+
+
+
+        #losses += train_step(input_ids=input_ids, optim=optim, criterion=criterion, vocab_size=len(vocab.get_itos()))
+    #print(f'Epoch {epoch+1}, losses : {losses}')
+end = time.time() - start
+
+print("Train loop time :", end)
+
+
+def gen_text(model, prompt, max_tokens = 20):
+    model.eval()
+    ids = tokenizerWrap.padAndEncode(prompt, vocab, use_first_and_second_part=False)
+    
+    pad_id = vocab.get_stoi()["<pad>"]
+    if pad_id in ids:
+        ids = ids[:ids.index(pad_id)]
+
+    ids = ids[:, :len(ids)]
+    input_ids = torch.tensor([ids], dtype=torch.long).to(device)
+    for _ in range(max_tokens):
+        with torch.no_grad():
+            outputs = model(input_ids)
+            next_token_logits = outputs[0, -1, :]
+            next_token_id = torch.argmax(next_token_logits).unsqueeze(0)
+            input_ids = torch.cat([input_ids, next_token_id], dim=1)
+
+    result_ids = input_ids[0].cpu().numpy().tolist()
+    return tokenizerWrap.tokenizer.decode(result_ids)
+
+prompt = "The movie was"
+generated_text = gen_text(model, prompt, max_tokens=20)
+print("Generated text:", generated_text)
+
+print("\nPrompt: I think that")
+print("Generated:", gen_text(model, "I think that"))
+
+#accuracy = 0
+#with torch.no_grad():
+#    model.eval()
+#    for input_ids in test_loader:
+#        input_ids = input_ids.to(device)
+#        test_input = input_ids[:, :-1]
+#        test_targets = input_ids[:, 1:]
+#        outputs = model(test_input)
+#        outputs = outputs.reshape(-1, vocab_size)
+#        train_targets = train_targets.reshape(-1)
+#        loss = criterion(outputs, test_targets)
+        
+
+
 
 
