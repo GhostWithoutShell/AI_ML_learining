@@ -41,8 +41,10 @@ class AttentionLayer(nn.Module):
         final_mask = padding_mask & tri_mask
 
         scores = scores/math.sqrt(self.head_dim)
-        
-        attention_scores = scores.masked_fill(final_mask == 0, -1e9)
+        min_value = torch.finfo(scores.dtype).min
+        ## for resolve problem with autoscale 
+        attention_scores = scores.masked_fill(final_mask == 0, min_value)
+
         attention_scores = torch.softmax(attention_scores, dim=-1)
         result = torch.matmul(attention_scores, x_v_tr)
         result = result.transpose(1,2).contiguous()
@@ -169,12 +171,15 @@ pad_index = vocab.get_stoi()["<pad>"]
 model = GPTLikeModel(vocab_size=vocab_size, size_kernel=256, num_heads=8, num_layers=3, pad_index=pad_index).to(device)
 
 print(len(data["input_ids"].iloc[0]))
+scaler = torch.cuda.amp.GradScaler()
+
 
 optim = torch.optim.AdamW(model.parameters(), lr= learning_rate)
 criterion = torch.nn.CrossEntropyLoss(ignore_index=pad_index)
 losses = 0
 loss_values = []
 start = time.time()
+
 print("#### START TRAIN LOOP")
 for epoch in range(num_epochs):
     model.train()
@@ -185,16 +190,19 @@ for epoch in range(num_epochs):
         train_trargets = input_ids[:, 1:]
         train_input = input_ids[:, :-1]
         optim.zero_grad()
-        outputs = model(train_input)
-        outputs = outputs.reshape(-1, len(vocab.get_itos()))
-        train_trargets = train_trargets.reshape(-1)
 
-        loss = criterion(outputs, train_trargets)
+        with torch.cuda.amp.autocast():
 
-        loss += losses
+            outputs = model(train_input)
+            outputs = outputs.reshape(-1, len(vocab.get_itos()))
+            train_trargets = train_trargets.reshape(-1)
 
-        loss.backward()
-        optim.step()
+            loss = criterion(outputs, train_trargets)
+            scaler.scale(loss).backward()
+            scaler.step(optim)
+            scaler.update()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        losses += loss.item()
 
         
 
@@ -242,33 +250,61 @@ end = time.time() - start
 print("Train loop time :", end)
 
 
-def gen_text(model, prompt, max_tokens = 20):
+import torch.nn.functional as F
+
+def generate_sample(model, prompt, max_tokens=30, temperature=0.8, top_k=50):
     model.eval()
-    ids = tokenizerWrap.padAndEncode(prompt, vocab, use_first_and_second_part=False)
-    
+    removed_from_k = []
+    # 1. Токенизация (как раньше)
+    ids = tokenizerWrap.padAndEncode(prompt, vocab=vocab)
     pad_id = vocab.get_stoi()["<pad>"]
     if pad_id in ids:
         ids = ids[:ids.index(pad_id)]
-
-    ids = ids[:, :len(ids)]
+        
     input_ids = torch.tensor([ids], dtype=torch.long).to(device)
+
     for _ in range(max_tokens):
         with torch.no_grad():
-            outputs = model(input_ids)
-            next_token_logits = outputs[0, -1, :]
-            next_token_id = torch.argmax(next_token_logits).unsqueeze(0)
+            # Получаем логиты
+            logits = model(input_ids)
+            
+            # Берем только последний токен: [1, Vocab_Size]
+            next_token_logits = logits[:, -1, :]
+            
+            # --- МАГИЯ НАЧИНАЕТСЯ ЗДЕСЬ ---
+            
+            # 1. Применяем температуру (делим логиты)
+            # Чем меньше temp, тем больше разрыв между "хорошими" и "плохими" словами
+            next_token_logits = next_token_logits / temperature
+            
+            # 2. Фильтрация Top-K (оставляем только топ-50 слов, остальным -inf)
+            if top_k > 0:
+                # Находим значения топ-k токенов
+                top_values, _ = torch.topk(next_token_logits, top_k)
+                min_val = top_values[:, -1] # Самое маленькое из топов
+                # Все что меньше минимума заменяем на минус бесконечность
+                next_token_logits[next_token_logits < min_val] = -float('Inf')
+            
+            # 3. Превращаем в вероятности (Softmax)
+            probs = F.softmax(next_token_logits, dim=-1)
+            
+            # 4. Случайный выбор с учетом вероятностей (Multinomial)
+            # Это "бросок кубика"
+            next_token_id = torch.multinomial(probs, num_samples=1)
+            
+            # Добавляем к последовательности
             input_ids = torch.cat([input_ids, next_token_id], dim=1)
-
-    result_ids = input_ids[0].cpu().numpy().tolist()
+            
+    result_ids = input_ids[0].tolist()
+    print("Removed from top k: ", set(removed_from_k[0]))
     return tokenizerWrap.tokenizer.decode(result_ids)
-
 prompt = "The movie was"
-generated_text = gen_text(model, prompt, max_tokens=20)
+print("\nPrompt: The movie was")
+generated_text = generate_sample(model, prompt, max_tokens=20)
 print("Generated text:", generated_text)
 
 print("\nPrompt: I think that")
-print("Generated:", gen_text(model, "I think that"))
-
+print("Generated:", generate_sample(model, "I think that"))
 #accuracy = 0
 #with torch.no_grad():
 #    model.eval()
