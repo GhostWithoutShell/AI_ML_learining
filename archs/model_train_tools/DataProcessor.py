@@ -81,9 +81,8 @@ class TokenizatorProcessing:
 
 class TokenizatorProcessingWordPeace(TokenizatorProcessing):
     class CustomVocab:
-        def __init__(self, tokenizer, vocab_file_name):
+        def __init__(self, tokenizer):
             self.tokenizer = tokenizer
-            self.vocab_file_name = vocab_file_name
             self.stoi = tokenizer.get_vocab()
             self.itos = {v: k for k, v in self.stoi.items()}
             self.specials = {"<unk>", "<pad>", "<cls>"}
@@ -100,10 +99,11 @@ class TokenizatorProcessingWordPeace(TokenizatorProcessing):
         def get_itos(self):
             return self.itos
         
-    def __init__(self, max_length, special_tokens, vocab_size=30000):
+    def __init__(self, max_length, special_tokens, vocab_file_name="", vocab_size=30000):
         self.max_length = max_length
         self.vocab_size = vocab_size
         self.special_tokens = special_tokens
+        self.vocab_file_name = vocab_file_name
         self.__prepareTokenizator()
     def __prepareTokenizator(self):
         self.tokenizer = Tokenizer(WordPiece(unk_token="<unk>"))

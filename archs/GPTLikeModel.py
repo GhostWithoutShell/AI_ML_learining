@@ -150,7 +150,7 @@ learning_rate = 0.0001
 vocab_size = 10000
 
 
-tokenizerWrap = dp.TokenizatorProcessingWordPeace(max_length=256, special_tokens=["<unk>", "<pad>"], vocab_size=vocab_size)
+tokenizerWrap = dp.TokenizatorProcessingWordPeace(max_length=256, special_tokens=["<unk>", "<pad>"], vocab_file_name="imdb_vocab.json", vocab_size=vocab_size)
 vocab = tokenizerWrap.prepareVocab(data, column_with_text="review")
 data["input_ids"] = data["review"].apply(lambda x: tokenizerWrap.padAndEncode(x, vocab=vocab, use_first_and_second_part=False))
 data.columns = ['review', 'labels', 'input_ids']
