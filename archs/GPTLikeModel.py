@@ -144,10 +144,10 @@ data = dt.cleanTextFromTrash(data, params)
 data = dt.applyLabelFix(data, params)
 print(data.head())
 
-num_epochs = 2
+num_epochs = 4
 batch_size = 16
-learning_rate = 0.001
-vocab_size = 8000
+learning_rate = 0.0001
+vocab_size = 10000
 
 
 tokenizerWrap = dp.TokenizatorProcessingWordPeace(max_length=256, special_tokens=["<unk>", "<pad>"], vocab_size=vocab_size)
@@ -168,7 +168,8 @@ import time
 print(data.head())  
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 pad_index = vocab.get_stoi()["<pad>"]
-model = GPTLikeModel(vocab_size=vocab_size, size_kernel=256, num_heads=8, num_layers=3, pad_index=pad_index).to(device)
+real_vocab_size = len(vocab.get_stoi())
+model = GPTLikeModel(vocab_size=real_vocab_size, size_kernel=256, num_heads=8, num_layers=3, pad_index=pad_index).to(device)
 
 print(len(data["input_ids"].iloc[0]))
 scaler = torch.cuda.amp.GradScaler()
@@ -186,9 +187,12 @@ for epoch in range(num_epochs):
     losses = 0
     for input_ids in train_loader:
         input_ids = input_ids.to(device)
-
+        # берем все кроме последнего токена
         train_trargets = input_ids[:, 1:]
+        # берем все кроме первого токена
         train_input = input_ids[:, :-1]
+        # получаестя [a,b,c], [b,c,d] это нужно для того чтобы мы могли парралельно сравнивать предсказания модели с правильными ответами
+        # иначе бы пришлось делать цикл по всем токенам, по итогу мы не берем последний токен т.к для него нет пары, а сравниваем 1ый токен со вторым и т.д
         optim.zero_grad()
 
         with torch.cuda.amp.autocast():
@@ -296,7 +300,6 @@ def generate_sample(model, prompt, max_tokens=30, temperature=0.8, top_k=50):
             input_ids = torch.cat([input_ids, next_token_id], dim=1)
             
     result_ids = input_ids[0].tolist()
-    print("Removed from top k: ", set(removed_from_k[0]))
     return tokenizerWrap.tokenizer.decode(result_ids)
 prompt = "The movie was"
 print("\nPrompt: The movie was")
@@ -305,6 +308,10 @@ print("Generated text:", generated_text)
 
 print("\nPrompt: I think that")
 print("Generated:", generate_sample(model, "I think that"))
+
+torch.save(model.state_dict(), "my_first_gpt.pth")
+print("Model saved successfully!")
+
 #accuracy = 0
 #with torch.no_grad():
 #    model.eval()
