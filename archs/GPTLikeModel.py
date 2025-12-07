@@ -16,7 +16,7 @@ class AttentionLayer(nn.Module):
         self.num_heads = num_heads
         self.pad_index = pad_index
         self.head_dim = size_kernel // num_heads
-
+        self.last_attention_scores = None
         self.key = nn.Linear(size_kernel, size_kernel)
         self.value = nn.Linear(size_kernel, size_kernel)
         self.query = nn.Linear(size_kernel, size_kernel)
@@ -46,6 +46,9 @@ class AttentionLayer(nn.Module):
         attention_scores = scores.masked_fill(final_mask == 0, min_value)
 
         attention_scores = torch.softmax(attention_scores, dim=-1)
+
+        self.last_attention_scores = attention_scores.detach().cpu()
+
         result = torch.matmul(attention_scores, x_v_tr)
         result = result.transpose(1,2).contiguous()
         result = result.view(batch_size, seq_len, self.size_kernel)
@@ -77,7 +80,6 @@ class AttentionBlock(nn.Module):
 
     def forward(self, x, input_ids):
         x_norm = self.norm(x)
-        #print(x_norm.shape)
         x_att = self.attention(x_norm, input_ids)
         x = self.dropout(x_att) + x
         x_out = self.ff(x)
@@ -132,8 +134,6 @@ def train_step(optim, criterion, model, input_ids, vocab_size):
     optim.zero_grad()
     return loss.item()
 
-## train_input = input_ids[:, :-1]
-## train_targets = input_ids[:, 1:]
 dt = dp.DataBuilderImdb()
 data = dt.getDataFromCsv("D:\MyFiles\Datasets\IMDB\IMDB Dataset.csv")
 params = {
@@ -154,113 +154,80 @@ tokenizerWrap = dp.TokenizatorProcessingWordPeace(max_length=256, special_tokens
 vocab = tokenizerWrap.prepareVocab(data, column_with_text="review")
 data["input_ids"] = data["review"].apply(lambda x: tokenizerWrap.padAndEncode(x, vocab=vocab, use_first_and_second_part=False))
 data.columns = ['review', 'labels', 'input_ids']
-train, test = train_test_split(data, test_size=0.2, random_state=42)
 
-train_dataset = GptLikeDataset(train["input_ids"].tolist())
-train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-test_dataset = GptLikeDataset(test["input_ids"].tolist())
-test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
-
-
-import time
-
-
-print(data.head())  
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-pad_index = vocab.get_stoi()["<pad>"]
-real_vocab_size = len(vocab.get_stoi())
-model = GPTLikeModel(vocab_size=real_vocab_size, size_kernel=256, num_heads=8, num_layers=3, pad_index=pad_index).to(device)
-
-print(len(data["input_ids"].iloc[0]))
-scaler = torch.cuda.amp.GradScaler()
-
-
-optim = torch.optim.AdamW(model.parameters(), lr= learning_rate)
-criterion = torch.nn.CrossEntropyLoss(ignore_index=pad_index)
-losses = 0
-loss_values = []
-start = time.time()
-
-print("#### START TRAIN LOOP")
-for epoch in range(num_epochs):
-    model.train()
-    losses = 0
-    for input_ids in train_loader:
-        input_ids = input_ids.to(device)
-        # берем все кроме последнего токена
-        train_trargets = input_ids[:, 1:]
-        # берем все кроме первого токена
-        train_input = input_ids[:, :-1]
-        # получаестя [a,b,c], [b,c,d] это нужно для того чтобы мы могли парралельно сравнивать предсказания модели с правильными ответами
-        # иначе бы пришлось делать цикл по всем токенам, по итогу мы не берем последний токен т.к для него нет пары, а сравниваем 1ый токен со вторым и т.д
-        optim.zero_grad()
-
-        with torch.cuda.amp.autocast():
-
-            outputs = model(train_input)
-            outputs = outputs.reshape(-1, len(vocab.get_itos()))
-            train_trargets = train_trargets.reshape(-1)
-
-            loss = criterion(outputs, train_trargets)
-            scaler.scale(loss).backward()
-            scaler.step(optim)
-            scaler.update()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        losses += loss.item()
-
-        
-
-    avg_loss = losses / len(train_loader)
-
-    model.eval()
-    total_val_losses = 0
-    correct_tokens = 0
-    total_tokens = 0
-    with torch.no_grad():
-        for input_ids_val in test_loader:
-            input_ids_val = input_ids_val.to(device)
-            test_targets = input_ids_val[:, 1:]
-            test_input = input_ids_val[:, :-1]
-
-            outputs = model(test_input)
-
-            #outputs = outputs.reshape(-1, len(vocab.get_itos()))
-            #test_targets = test_targets.reshape(-1)
-
-            loss = criterion(outputs.reshape(-1, len(vocab.get_itos())), test_targets.reshape(-1))
-
-            total_val_losses += loss.item()
-            prediction = torch.argmax(outputs, dim=-1)
-            mask = (test_targets != pad_index)
-
-            correct = (prediction == test_targets) & mask
-            correct_tokens += correct.sum().item()
-            total_tokens += mask.sum().item()
-
-        avg_val_loss = total_val_losses / len(test_loader)
-        val_accuracy = correct_tokens / total_tokens if total_tokens > 0 else 0.0000
-
-        print(f'Epoch {epoch+1} | Val avg loss {avg_val_loss:.4f} | Val acc {val_accuracy:.4f}')
-
-
-
-
-
-
-        #losses += train_step(input_ids=input_ids, optim=optim, criterion=criterion, vocab_size=len(vocab.get_itos()))
-    #print(f'Epoch {epoch+1}, losses : {losses}')
-end = time.time() - start
-
-print("Train loop time :", end)
 
 
 import torch.nn.functional as F
 
+
+import seaborn as sns
+import matplotlib.pyplot as plt
+import numpy as np
+
+def visualize_attention(model, text, vocab, tokenizerWrap, device, layer_num=0, head_num=0):
+    model.eval()
+    
+    # 1. Подготовка данных
+    # Используем твой токенизатор
+    input_ids = tokenizerWrap.padAndEncode(text, vocab=vocab, use_first_and_second_part=False)
+    
+    # Обрезаем паддинги, чтобы картинка была чистой (без кучи <pad>)
+    pad_id = vocab.get_stoi()["<pad>"]
+    if pad_id in input_ids:
+        real_len = input_ids.index(pad_id)
+        input_ids = input_ids[:real_len]
+    else:
+        real_len = len(input_ids)
+
+    # Декодируем токены обратно в слова для подписей осей
+    tokens = tokenizerWrap.tokenizer.decode(input_ids).split() # Или свой метод получения списка слов
+    # Если decode возвращает строку, можно попробовать vocab.lookup_tokens(input_ids)
+    
+    # Создаем тензор
+    input_tensor = torch.tensor([input_ids], dtype=torch.long).to(device)
+
+    # 2. Прогон через модель
+    with torch.no_grad():
+        _ = model(input_tensor)
+
+    # 3. Достаем сохраненные скоры
+    # model.attention_blocks[layer_num] -> это i-й блок
+    # .attention -> это твой AttentionBlock
+    # .attention -> это твой AttentionLayer (проверь вложенность в своем коде!)
+    # Если у тебя AttentionBlock.attention = AttentionLayer, то путь такой:
+    
+    # Получаем матрицу внимания [Batch, Heads, Seq_Len, Seq_Len]
+    # Берем [0] (первый элемент батча) -> [Heads, Seq, Seq]
+    scores = model.attention_blocks[layer_num].attention.last_attention_scores[0]
+    
+    # Берем конкретную голову
+    head_scores = scores[head_num] # [Seq, Seq]
+    
+    # Обрезаем матрицу под реальную длину (без паддингов)
+    head_scores = head_scores[:real_len, :real_len]
+
+    # 4. Рисуем
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(
+        head_scores, 
+        xticklabels=tokens, 
+        yticklabels=tokens, 
+        cmap="viridis", # или "Blues", "Reds"
+        annot=False,    # Если True, будет писать цифры (грязно для больших матриц)
+        square=True
+    )
+    plt.title(f"Layer {layer_num+1}, Head {head_num+1}")
+    plt.xlabel("Key (на кого смотрим)")
+    plt.ylabel("Query (кто смотрит)")
+    plt.show()
+
+
+
+
+
 def generate_sample(model, prompt, max_tokens=30, temperature=0.8, top_k=50):
     model.eval()
-    removed_from_k = []
-    # 1. Токенизация (как раньше)
-    ids = tokenizerWrap.padAndEncode(prompt, vocab=vocab)
+    ids = tokenizerWrap.padAndEncode(prompt, vocab=vocab, use_first_and_second_part=False)
     pad_id = vocab.get_stoi()["<pad>"]
     if pad_id in ids:
         ids = ids[:ids.index(pad_id)]
@@ -269,62 +236,132 @@ def generate_sample(model, prompt, max_tokens=30, temperature=0.8, top_k=50):
 
     for _ in range(max_tokens):
         with torch.no_grad():
-            # Получаем логиты
             logits = model(input_ids)
             
-            # Берем только последний токен: [1, Vocab_Size]
             next_token_logits = logits[:, -1, :]
             
-            # --- МАГИЯ НАЧИНАЕТСЯ ЗДЕСЬ ---
-            
-            # 1. Применяем температуру (делим логиты)
-            # Чем меньше temp, тем больше разрыв между "хорошими" и "плохими" словами
             next_token_logits = next_token_logits / temperature
             
-            # 2. Фильтрация Top-K (оставляем только топ-50 слов, остальным -inf)
             if top_k > 0:
-                # Находим значения топ-k токенов
+                
                 top_values, _ = torch.topk(next_token_logits, top_k)
-                min_val = top_values[:, -1] # Самое маленькое из топов
-                # Все что меньше минимума заменяем на минус бесконечность
+                min_val = top_values[:, -1]    
                 next_token_logits[next_token_logits < min_val] = -float('Inf')
             
-            # 3. Превращаем в вероятности (Softmax)
             probs = F.softmax(next_token_logits, dim=-1)
             
-            # 4. Случайный выбор с учетом вероятностей (Multinomial)
             # Это "бросок кубика"
             next_token_id = torch.multinomial(probs, num_samples=1)
-            
-            # Добавляем к последовательности
             input_ids = torch.cat([input_ids, next_token_id], dim=1)
-            
     result_ids = input_ids[0].tolist()
     return tokenizerWrap.tokenizer.decode(result_ids)
-prompt = "The movie was"
-print("\nPrompt: The movie was")
-generated_text = generate_sample(model, prompt, max_tokens=20)
-print("Generated text:", generated_text)
-
-print("\nPrompt: I think that")
-print("Generated:", generate_sample(model, "I think that"))
-
-torch.save(model.state_dict(), "my_first_gpt.pth")
-print("Model saved successfully!")
-
-#accuracy = 0
-#with torch.no_grad():
-#    model.eval()
-#    for input_ids in test_loader:
-#        input_ids = input_ids.to(device)
-#        test_input = input_ids[:, :-1]
-#        test_targets = input_ids[:, 1:]
-#        outputs = model(test_input)
-#        outputs = outputs.reshape(-1, vocab_size)
-#        train_targets = train_targets.reshape(-1)
-#        loss = criterion(outputs, test_targets)
-        
 
 
+import sys
 
 
+pad_index = vocab.get_stoi()["<pad>"]
+real_vocab_size = len(vocab.get_stoi())
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+def main(type):
+    if type == "train":
+        train, test = train_test_split(data, test_size=0.2, random_state=42)
+
+        train_dataset = GptLikeDataset(train["input_ids"].tolist())
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        test_dataset = GptLikeDataset(test["input_ids"].tolist())
+        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+        import time
+        print(data.head())  
+        print(len(data["input_ids"].iloc[0]))
+        scaler = torch.cuda.amp.GradScaler()
+
+        optim = torch.optim.AdamW(model.parameters(), lr= learning_rate)
+        criterion = torch.nn.CrossEntropyLoss(ignore_index=pad_index)
+        losses = 0
+        loss_values = []
+        start = time.time()
+        print("#### START TRAIN LOOP")
+        for epoch in range(num_epochs):
+            model.train()
+            losses = 0
+            for input_ids in train_loader:
+                input_ids = input_ids.to(device)
+                # берем все кроме последнего токена
+                train_trargets = input_ids[:, 1:]
+                # берем все кроме первого токена
+                train_input = input_ids[:, :-1]
+                # получаестя [a,b,c], [b,c,d] это нужно для того чтобы мы могли парралельно сравнивать предсказания модели с правильными ответами
+                # иначе бы пришлось делать цикл по всем токенам, по итогу мы не берем последний токен т.к для него нет пары, а сравниваем 1ый токен со вторым и т.д
+                optim.zero_grad()
+                with torch.cuda.amp.autocast():
+                    outputs = model(train_input)
+                    outputs = outputs.reshape(-1, len(vocab.get_itos()))
+                    train_trargets = train_trargets.reshape(-1)
+                    loss = criterion(outputs, train_trargets)
+                    scaler.scale(loss).backward()
+                    scaler.step(optim)
+                    scaler.update()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                losses += loss.item()
+            avg_loss = losses / len(train_loader)
+
+        model.eval()
+        total_val_losses = 0
+        correct_tokens = 0
+        total_tokens = 0
+        with torch.no_grad():
+            for input_ids_val in test_loader:
+                input_ids_val = input_ids_val.to(device)
+                test_targets = input_ids_val[:, 1:]
+                test_input = input_ids_val[:, :-1]
+
+                outputs = model(test_input)
+                loss = criterion(outputs.reshape(-1, len(vocab.get_itos())), test_targets.reshape(-1))
+
+                total_val_losses += loss.item()
+                prediction = torch.argmax(outputs, dim=-1)
+                mask = (test_targets != pad_index)
+
+                correct = (prediction == test_targets) & mask
+                correct_tokens += correct.sum().item()
+                total_tokens += mask.sum().item()
+
+            avg_val_loss = total_val_losses / len(test_loader)
+            val_accuracy = correct_tokens / total_tokens if total_tokens > 0 else 0.0000
+
+            print(f'Epoch {epoch+1} | Val avg loss {avg_val_loss:.4f} | Val acc {val_accuracy:.4f}')
+        end = time.time() - start
+        torch.save(model.state_dict(), "my_first_gpt.pth")
+        print("Model saved successfully!")
+        print("Train loop time :", end)
+    elif type == "debug":
+        print("\n=== AI CHAT (type 'exit' to stop) ===")
+        model = GPTLikeModel(vocab_size=real_vocab_size, size_kernel=256, num_heads=8, num_layers=3, pad_index=pad_index).to(device)
+        model.load_state_dict(torch.load("my_first_gpt.pth"))
+        model = model.to(device)
+
+        while True:
+            user_input = input("\nYou: ")
+            if user_input.lower() in ["exit", "quit"]:
+                break
+            
+            # Генерируем
+            response = generate_sample(
+                model, 
+                user_input, 
+                max_tokens=30, 
+                temperature=0.8, 
+                top_k=50
+            )
+            response = response.replace(user_input, "") 
+
+            print(f"AI: {response}") 
+            visualize_attention(model, response, vocab, tokenizerWrap, device, layer_num=0, head_num=0)
+            visualize_attention(model, response, vocab, tokenizerWrap, device, layer_num=2, head_num=7)
+
+args = sys.argv[1:]
+type = args[0]
+
+main(type=type)

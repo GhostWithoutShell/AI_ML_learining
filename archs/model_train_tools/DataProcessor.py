@@ -7,7 +7,7 @@ from tokenizers.pre_tokenizers import Whitespace
 from tokenizers import Tokenizer
 from tokenizers.models import WordPiece
 from tokenizers.trainers import WordPieceTrainer
-
+import os
 class DataBulder:
 
     def getDataFromCsv():
@@ -81,8 +81,9 @@ class TokenizatorProcessing:
 
 class TokenizatorProcessingWordPeace(TokenizatorProcessing):
     class CustomVocab:
-        def __init__(self, tokenizer):
+        def __init__(self, tokenizer, vocab_file_name):
             self.tokenizer = tokenizer
+            self.vocab_file_name = vocab_file_name
             self.stoi = tokenizer.get_vocab()
             self.itos = {v: k for k, v in self.stoi.items()}
             self.specials = {"<unk>", "<pad>", "<cls>"}
@@ -135,8 +136,13 @@ class TokenizatorProcessingWordPeace(TokenizatorProcessing):
         return token_ids
     def prepareVocab(self, dt, column_with_text):
         len_text = len(dt)
-        self.tokenizer.train_from_iterator(self.__get_training_corpus(len_text, dt, column_with_text), trainer=self.trainer)
-        return self.__getVocab()
+        if os.path.exists(self.vocab_file_name):
+            self.tokenizer = Tokenizer.from_file(self.vocab_file_name)
+            return self.__getVocab()
+        else:
+            self.tokenizer.train_from_iterator(self.__get_training_corpus(len_text, dt, column_with_text), trainer=self.trainer)
+            self.tokenizer.save(self.vocab_file_name)
+            return self.__getVocab()
     def __getVocab(self):
         return self.CustomVocab(self.tokenizer)
 
