@@ -1382,3 +1382,4 @@ archs/debug_transformer/word_cloud.png
 archs/debug_transformer/Новый текстовый документ.txt
 archs/model_train_tools/__pycache__/DataProcessor.cpython-310.pyc
 archs/model_train_tools/__pycache__/DebuggerTools.cpython-310.pyc
+archs/models_state_dicts/my_first_gpt_russian.pth
