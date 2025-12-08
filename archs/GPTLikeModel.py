@@ -75,6 +75,7 @@ class AttentionBlock(nn.Module):
         
         
         self.norm = nn.LayerNorm(size_kernel)
+        self.norm_ff = nn.LayerNorm(size_kernel)
         self.dropout = nn.Dropout(0.2)
         self.ff = FeedForward(size_kernel=size_kernel)
 
@@ -82,8 +83,7 @@ class AttentionBlock(nn.Module):
         x_norm = self.norm(x)
         x_att = self.attention(x_norm, input_ids)
         x = self.dropout(x_att) + x
-        x_out = self.ff(x)
-        x = self.dropout(x_out) + x
+        x = x + self.dropout(self.ff(self.norm_ff(x)))
         return x
     
 
@@ -148,10 +148,10 @@ data = dt.cleanTextFromTrash(data, params)
 #data = dt.applyLabelFix(data, params)
 print(data.head())
 
-num_epochs = 4
-batch_size = 32
+num_epochs = 6
+batch_size = 16
 learning_rate = 0.001
-vocab_size = 10000
+vocab_size = 15000
 
 
 print("Len dataset" ,len(data))
@@ -159,7 +159,7 @@ print("Len dataset" ,len(data))
 #data = data[data["rating"] > 1]
 data_ = data[['text']]
 
-tokenizerWrap = dp.TokenizatorProcessingWordPeace(max_length=256, special_tokens=["<unk>", "<pad>"], vocab_file_name="russian_joke_vocab.json", vocab_size=vocab_size)
+tokenizerWrap = dp.TokenizatorProcessingWordPeace(max_length=256, special_tokens=["<unk>", "<pad>"], vocab_file_name="russian_joke_vocab_15.json", vocab_size=vocab_size)
 vocab = tokenizerWrap.prepareVocab(data_, column_with_text="text")
 data_["input_ids"] = data_["text"].apply(lambda x: tokenizerWrap.padAndEncode(x, vocab=vocab, use_first_and_second_part=False))
 data_.columns = ['review', 'input_ids']
@@ -298,7 +298,9 @@ def main(type):
         for epoch in tqdm(range(num_epochs), desc="Training epochs"):
             model.train()
             losses = 0
-            for input_ids in train_loader:
+            accumulation_steps = 4  # Хотим эмулировать батч 16 * 4 = 64
+            model.zero_grad()
+            for i, input_ids in enumerate(train_loader):
                 input_ids = input_ids.to(device)
                 # берем все кроме последнего токена
                 train_trargets = input_ids[:, 1:]
@@ -306,16 +308,19 @@ def main(type):
                 train_input = input_ids[:, :-1]
                 # получаестя [a,b,c], [b,c,d] это нужно для того чтобы мы могли парралельно сравнивать предсказания модели с правильными ответами
                 # иначе бы пришлось делать цикл по всем токенам, по итогу мы не берем последний токен т.к для него нет пары, а сравниваем 1ый токен со вторым и т.д
-                optim.zero_grad()
+                #optim.zero_grad()
                 with torch.cuda.amp.autocast():
                     outputs = model(train_input)
                     outputs = outputs.reshape(-1, len(vocab.get_itos()))
                     train_trargets = train_trargets.reshape(-1)
                     loss = criterion(outputs, train_trargets)
-                    scaler.scale(loss).backward()
+                    loss = loss / accumulation_steps
+                scaler.scale(loss).backward()
+                if (i + 1) % accumulation_steps == 0:
                     scaler.step(optim)
                     scaler.update()
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    optim.zero_grad()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 losses += loss.item()
             avg_loss = losses / len(train_loader)
 
