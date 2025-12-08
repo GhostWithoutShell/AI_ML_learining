@@ -99,7 +99,7 @@ class GPTLikeModel(nn.Module):
         ])        
         self.drop = nn.Dropout(0.2)
         self.fc_out = nn.Linear(size_kernel, vocab_size, bias=False)
-        self.embedding.weight.data =self.embedding.weight
+        self.embedding.weight =self.embedding.weight
         
     def forward(self, input_ids):
         batch_size, seq_len = input_ids.size()
@@ -267,7 +267,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 def main(type):
     if type == "train":
         train, test = train_test_split(data, test_size=0.2, random_state=42)
-
+        
         train_dataset = GptLikeDataset(train["input_ids"].tolist())
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
         test_dataset = GptLikeDataset(test["input_ids"].tolist())
@@ -277,10 +277,12 @@ def main(type):
         print(len(data["input_ids"].iloc[0]))
         scaler = torch.cuda.amp.GradScaler()
 
-        optim = torch.optim.AdamW(model.parameters(), lr= learning_rate)
+        
         criterion = torch.nn.CrossEntropyLoss(ignore_index=pad_index)
         losses = 0
         loss_values = []
+        model = GPTLikeModel(vocab_size=real_vocab_size, size_kernel=256, num_heads=8, num_layers=3, pad_index=pad_index).to(device)
+        optim = torch.optim.AdamW(model.parameters(), lr= learning_rate)
         start = time.time()
         print("#### START TRAIN LOOP")
         for epoch in range(num_epochs):
