@@ -32,12 +32,9 @@ def selection_tournament(population, tournament_size=3):
     Выбирает случайных `tournament_size` индивидов из популяции
     и возвращает того, у кого самый высокий fitness.
     """
-    samples = random.sample(population, k = tournament_size)
-    result = []
-    for i in range(len(samples)-1):
-        first_fit, second_fit = calculate_fitness(samples[i]), calculate_fitness(samples[i+1])
-        result.append(math.max(first_fit, second_fit))
-
+    tournament = random.sample(population, tournament_size)
+    winner = max(tournament, key=calculate_fitness)
+    return winner
 def crossover(parent1, parent2):
     """
     Создает ребенка, беря половину генов от parent1 и половину от parent2.
@@ -52,12 +49,11 @@ def mutate(individual, mutation_rate=0.01):
     заменяет его на случайный новый символ из GENES.
     """
     individual_list = list(individual) # Строки в Python неизменяемы, лучше работать со списком
-    for _ in range(len(TARGET_PHRASE)):
-        if random() < mutation_rate:
-            index_new_sy = random.randomrange(0, len(GENRES))
+    for i in range(len(TARGET_PHRASE)):
+        if random.random() < mutation_rate:
+            index_new_sy = random.randrange(0, len(GENRES))
             new_sy = GENRES[index_new_sy]
-            new_index_sy = random.randomrange(0, len(TARGET_PHRASE))
-            individual[new_index_sy] = new_sy
+            individual_list[i] = new_sy
     return "".join(individual_list)
 
 def evolve(population, target_len, mutation_rate=0.01):
@@ -66,19 +62,35 @@ def evolve(population, target_len, mutation_rate=0.01):
     """
     new_population = []
     
-    # Элитизм: можно (но не обязательно) сразу перенести самого лучшего из старого поколения в новое без изменений
-    # Это гарантирует, что fitness никогда не упадет.
     
-    # Пока размер новой популяции не станет равен размеру старой:
-    # 1. parent1 = selection_tournament(...)
-    # 2. parent2 = selection_tournament(...)
-    # 3. child = crossover(parent1, parent2)
-    # 4. child = mutate(child, mutation_rate)
-    # 5. добавить child в new_population
+    for _ in range(len(population)):
+        parent1 = selection_tournament(population=population)
+        parent2 = selection_tournament(population=population)
+        child = crossover(parent1=parent1, parent2=parent2)
+        child = mutate(child, mutation_rate=mutation_rate)
+        new_population.append(child)
+    
     
     return new_population
-print(create_individual(len(TARGET_PHRASE)))
-print(create_individual(len(TARGET_PHRASE)))
-print(create_individual(len(TARGET_PHRASE)))
+POPULATION_SIZE = 200
+population = create_population(POPULATION_SIZE, len(TARGET_PHRASE))
+generation = 1
+
+while True:
+    
+    best_individual = max(population, key=calculate_fitness)
+    fitness = calculate_fitness(best_individual)
+    
+    print(f"Gen {generation} | Best: '{best_individual}' | Fitness: {fitness}/{len(TARGET_PHRASE)}")
+    
+    
+    if best_individual == TARGET_PHRASE:
+        break
+        
+    
+    population = evolve(population, POPULATION_SIZE, mutation_rate=0.1)
+    generation += 1
+
+print("\nУра! Фраза восстановлена!")
 
 
