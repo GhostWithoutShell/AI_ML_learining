@@ -57,38 +57,77 @@ class IDMAutoencoder(nn.Module):
     def __init__(self):
         super().__init__()
         self.embed_dim = 64 * 16
-        self.pos_emb = PositionalEncoding(d_model=self.embed_dim, max_len=1000)
         
+        # Positional Encoding оставляем (он важен)
+        self.pos_emb = PositionalEncoding(d_model=self.embed_dim, max_len=2000)
+        
+        # --- 1. ENCODER (Strided Conv вместо MaxPool) ---
         self.encoder_cnn = nn.Sequential(
-            nn.Conv2d(1, 32, kernel_size=(7, 3), stride=1, padding=(3, 1)),
-            nn.ReLU(),
-            nn.MaxPool2d(kernel_size=(2, 2)),
-            nn.Conv2d(32, 64, kernel_size=(7, 3), stride=1, padding=(3, 1)),
-            nn.ReLU(),
-            nn.MaxPool2d(kernel_size=(2, 2))
+            # Вход: [1, 64, W]
+            # Сжимаем: stride=(2, 2) уменьшает размер в 2 раза
+            nn.Conv2d(1, 32, kernel_size=(5, 3), stride=(2, 2), padding=(2, 1)),
+            nn.BatchNorm2d(32),
+            nn.GELU(), # GELU работает мягче и лучше для трансформеров
+            
+            # Вход: [32, 32, W/2]
+            nn.Conv2d(32, 64, kernel_size=(5, 3), stride=(2, 2), padding=(2, 1)),
+            nn.BatchNorm2d(64),
+            nn.GELU()
+            # Выход: [64, 16, W/4]
         )
         
-        encoder_layer = nn.TransformerEncoderLayer(d_model=self.embed_dim, nhead=4, batch_first=True)
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=2)
+        # --- 2. TRANSFORMER ---
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=self.embed_dim, 
+            nhead=8, # Увеличим кол-во голов для лучшего внимания
+            dim_feedforward=2048,
+            dropout=0.1,
+            batch_first=True
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=3) # +1 слой для глубины
+        
+        # --- 3. DECODER (PixelShuffle) ---
         self.decoder_cnn = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
+            # Этап 1: Восстанавливаем из [64, 16, W/4]
+            # PixelShuffle(2) уменьшает каналы в 4 раза (r^2), поэтому на входе нужно много каналов
+            # Нам нужно на выходе 32 канала. Значит вход PixelShuffle должен быть 32 * 4 = 128.
             
-            nn.ReLU(),
-            nn.Conv2d(64, 32, kernel_size=3, padding=1),
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.PixelShuffle(upscale_factor=2), # [128, H, W] -> [32, 2H, 2W]
             nn.BatchNorm2d(32),
-            nn.ReLU(),
-            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
-            nn.Conv2d(32, 1, kernel_size=3, padding=1),
+            nn.GELU(),
+            
+            # Этап 2: Восстанавливаем из [32, 32, W/2]
+            # Хотим на выходе 1 канал (картинку). 
+            # PixelShuffle съест каналы. Сделаем промежуточный слой.
+            
+            nn.Conv2d(32, 16 * 4, kernel_size=3, padding=1), # Готовим каналы для шафла
+            nn.PixelShuffle(upscale_factor=2), # [64, H, W] -> [16, 2H, 2W]
+            nn.GELU(),
+            
+            # Финальная доводка (резкость)
+            nn.Conv2d(16, 1, kernel_size=3, padding=1),
             nn.Sigmoid()
         )
+
     def forward(self, x):
         features = self.encoder_cnn(x) 
         b, c, h, w = features.shape
+        
+        # [Batch, Channels, Freq, Time] -> [Batch, Time, Channels*Freq]
         features_flat = features.permute(0, 3, 1, 2).reshape(b, w, c*h) 
+        
         features_flat = self.pos_emb(features_flat)
         latent = self.transformer(features_flat)
+        
+        # Обратно
         latent_reshaped = latent.reshape(b, w, c, h).permute(0, 2, 3, 1)
         reconstructed = self.decoder_cnn(latent_reshaped)
+        
+        # Иногда при Strided Conv размеры могут гулять на 1 пиксель
+        if reconstructed.shape != x.shape:
+             reconstructed = torch.nn.functional.interpolate(reconstructed, size=x.shape[2:], mode='bilinear')
+             
         return reconstructed
 
 def visualize_results(model, dataset, device, epoch):
@@ -118,10 +157,11 @@ def visualize_results(model, dataset, device, epoch):
 if __name__ == '__main__':
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Training on: {device}")
-    
+    weights = torch.ones(1, 1, 64, 1).to(device)
     train_dataset = IDMTensorDataset(tensor_folder='tensors/train', slice_len=3)
     val_dataset = IDMTensorDataset(tensor_folder='tensors/valid', slice_len=3)
-    
+    for i in range(64):
+        weights[:, :, i, :] = 1.0 + (i / 64) * 10.0  # Чем выше частота, тем больше штраф
     
     
     dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=2, pin_memory=True)
@@ -130,7 +170,14 @@ if __name__ == '__main__':
     model = IDMAutoencoder().to(device)
     criterion = torch.nn.L1Loss()
     optim = torch.optim.Adam(model.parameters(), lr=3e-4)
-    scheduler = ReduceLROnPlateau(optim, mode='min', factor=0.5, patience=6, verbose=True)
+    scheduler = ReduceLROnPlateau(
+        optim, 
+        mode='min', 
+        factor=0.5,     
+        patience=3,     
+        threshold=1e-3, 
+        verbose=True
+    )
     epochs = 100
 
     for epoch in range(epochs):
@@ -141,8 +188,9 @@ if __name__ == '__main__':
             batch = batch.to(device)
             
             output = model(batch)
-            loss = criterion(output, batch)
-            
+            loss_raw = torch.nn.functional.l1_loss(output, batch, reduction='none')
+            loss_weighted = loss_raw * weights
+            loss = loss_weighted.mean()
             loss.backward()
             optim.step()
             optim.zero_grad()
@@ -167,4 +215,4 @@ if __name__ == '__main__':
         
         if (epoch + 1) % 5 == 0:
             visualize_results(model, train_dataset, device, epoch+1)
-            torch.save(model.state_dict(), 'idm_autoencoder_fast.pth')
+            torch.save(model.state_dict(), f'idm_autoencoder_fast{epoch+1}.pth')
