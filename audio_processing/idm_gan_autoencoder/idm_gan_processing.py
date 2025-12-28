@@ -8,7 +8,7 @@ import glob
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from n_layer_descrim import IDMDiscriminator
 import math
-
+METRIC = 'mel'  # 'cwt' или 'mel'
 class IDMTensorDataset(Dataset):
     def __init__(self, tensor_folder, slice_len=3, sr=22050, hop_length=128):
         
@@ -158,9 +158,10 @@ def visualize_results(model, dataset, device, epoch):
 if __name__ == '__main__':
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Training GAN on: {device}")
+    root_folder = 'tensors' if METRIC == 'cwt' else 'idm_mels'
     weights = torch.ones(1, 1, 64, 1).to(device)
-    train_dataset = IDMTensorDataset(tensor_folder='tensors/train', slice_len=3)
-    val_dataset = IDMTensorDataset(tensor_folder='tensors/valid', slice_len=3)
+    train_dataset = IDMTensorDataset(tensor_folder=f'{root_folder}/train', slice_len=3)
+    val_dataset = IDMTensorDataset(tensor_folder=f'{root_folder}/valid', slice_len=3)
     for i in range(64):
         weights[:, :, i, :] = 1.0 + (i / 64) * 10.0  # Чем выше частота, тем больше штраф
     
@@ -183,7 +184,7 @@ if __name__ == '__main__':
     #    verbose=True
     #)
     epochs = 200
-    lambda_l1 = 100.0 
+    lambda_l1 = 150.0 
     for epoch in range(epochs):
         train_loss = 0
         generator.train() # Это теперь generator
@@ -240,6 +241,6 @@ if __name__ == '__main__':
         
         if (epoch + 1) % 5 == 0:
             visualize_results(generator, train_dataset, device, epoch+1)
-            torch.save(generator.state_dict(), 'idm_generator_gan.pth')
-            torch.save(discriminator.state_dict(), 'idm_discriminator.pth')
+            torch.save(generator.state_dict(), f'idm_generator_gan_{METRIC}.pth')
+            torch.save(discriminator.state_dict(), f'idm_discriminator_{METRIC}.pth')
             
