@@ -7,4 +7,8 @@ archs/tools/__pycache__/*
 archs/experimental_layers/noise_working/data/*
 archs/debug_transformer/*
 archs/model_train_tools/__pycache__/*
-
+audio_processing/idm_gan_autoencoder/model_state_dicts*
+audio_processing/idm_gan_autoencoder/__pycache__*
+audio_processing/idm_gan_autoencoder/tensors*
+audio_processing/idm_gan_autoencoder/art_frames*
+audio_processing/idm_gan_autoencoder/idm_mels*
