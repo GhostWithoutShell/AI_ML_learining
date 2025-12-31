@@ -6,7 +6,7 @@ from torch.utils.data import Dataset
 from torch.utils.data import random_split
 import pandas as pd
 from sklearn.preprocessing import LabelEncoder
-
+import numpy as np
 
 class RecSysBase(nn.Module):
     def __init__(self, user_emb_size, movie_emb_size, embeding_dim):
@@ -26,22 +26,26 @@ class RecSysBase(nn.Module):
     
         return (temp_res.sum(1) + user_bias + film_bias)
 class RecSysBaseMN(nn.Module):
-    def __init__(self, user_emb_size, movie_emb_size, embeding_dim, reduce_num, max_rating=5):
+    def __init__(self, user_emb_size, movie_emb_size, embeding_dim, reduce_num, len_genres, max_rating=5):
         super().__init__()
         self.max_rating = max_rating
         self.embeding_user = nn.Embedding(user_emb_size, embeding_dim)
         self.embeding_film = nn.Embedding(movie_emb_size, embeding_dim)
         
-        self.lin1 = nn.Linear(embeding_dim+embeding_dim, reduce_num)
+        self.lin1 = nn.Linear(embeding_dim*3, reduce_num)
         self.lin2 = nn.Linear(reduce_num, reduce_num//2)
         self.lin3 = nn.Linear(reduce_num//2, 1)
+        self.lin_genres = nn.Linear(len_genres, embeding_dim)
         self.relu = nn.ReLU()
         self.sigmoid = nn.Sigmoid()
         self.drop = nn.Dropout(0.2)
-    def forward(self, user_id, film_id):
+    def forward(self, user_id, film_id, genres=None):
         user_vec = self.embeding_user(user_id)
+        
         film_vec = self.embeding_film(film_id)
-        temp_res = torch.cat((user_vec, film_vec), dim=1)
+        genres_x = self.lin_genres(genres)
+        temp_res = torch.cat((user_vec, film_vec, genres_x), dim=1)
+        
         x = self.lin1(temp_res)
         x = self.relu(x)
         x = self.lin2(x)
@@ -52,39 +56,60 @@ class RecSysBaseMN(nn.Module):
         return self.sigmoid(x) * self.max_rating
     
 class MovieDataset(Dataset):
-    def __init__(self, user_ids, movie_ids, ratings):
+    def __init__(self, user_ids, movie_ids, ratings, genres):
         self.users = torch.tensor(user_ids, dtype=torch.long)
         self.movies = torch.tensor(movie_ids, dtype=torch.long)
         self.ratings = torch.tensor(ratings, dtype=torch.float32)
+        self.genres = torch.tensor(list(genres), dtype=torch.float32)
     def __len__(self):
         return len(self.ratings)
     def __getitem__(self, idx):
-        return (self.users[idx], self.movies[idx], self.ratings[idx])
-    
-def recommended_for_user(model, dt, device, user_id_encoded, label_encoder_movie, k = 5):
-    
-    movies_all = dt['movieId_encoded'].unique()
-    
-    movies_watched = dt[dt['userId'] == user_id_encoded]['movieId_encoded']
-    diff = list(set(movies_all) - set(movies_watched))
-    
-    
-    values =torch.tensor(diff, dtype=torch.long)
-    model.eval()
-    user_tensor = torch.tensor([user_id_encoded]*len(values), dtype=torch.long).to(device)
-    values = values.to(device)
-    with torch.no_grad():
-        predictions = model(user_id=user_tensor, film_id=values)
-        values, top5_idx = torch.topk(predictions, k)
-        recomended_films = [diff[i] for i in top5_idx.cpu().numpy()]
-        real_movie_ids = label_encoder_movie.inverse_transform(recomended_films)
-        print(f"Top {k} recommendations for user {user_id_encoded}:{real_movie_ids}")
+        return (self.users[idx], self.movies[idx], self.ratings[idx], self.genres[idx])
 
 
 
+    
+    
+
+from sklearn.preprocessing import MultiLabelBinarizer
 dt = pd.read_csv('Datasets//movie_lens//rating.csv', usecols=['movieId', 'userId', 'rating'])
-len_ = 200000
+df_genres = pd.read_csv('Datasets//movie_lens//movie.csv', usecols=['movieId', 'genres'])
+
+dt = dt.merge(df_genres, on='movieId', how='left')
+
+len_ = 20000
+
 dt = dt[:len_]
+genres = set()
+
+genres = dt['genres'].dropna().str.split('|').explode().unique().tolist()
+genres_to_idx = {genre : i for i, genre in enumerate(genres)}
+max_len_genres = len(genres)
+print(max_len_genres)
+
+
+## Продакшен реди вариант
+#mlb = MultiLabelBinarizer()
+#temp_ser = dt['genres'].str.split('|')
+#genre_vector = mlb.fit_transform(temp_ser)
+#print(genre_vector)
+
+def prepare_list_genres(genre_string):
+    vector = np.zeros(len(genres_to_idx), dtype=np.float32)
+    if not isinstance(genre_string, str):
+        return vector
+    current_movies_genres = genre_string.split('|')
+
+    for genre in current_movies_genres:
+        if genre in genres_to_idx:
+            idx = genres_to_idx[genre]
+            vector[idx] = 1.0
+    return vector
+    
+
+
+dt['genres_list'] = dt['genres'].apply(prepare_list_genres)
+print(dt.head())
 generator = torch.Generator().manual_seed(42)
 
 
@@ -101,7 +126,7 @@ print(label_encoder_user.classes_)
 dt['userId_encoded'] = label_encoder_user.transform(dt['userId'])
 dt['movieId_encoded'] = label_encoder_movie.transform(dt['movieId'])
 
-dataset = MovieDataset(dt['userId_encoded'].values, dt['movieId_encoded'].values, dt['rating'].values)
+dataset = MovieDataset(dt['userId_encoded'].values, dt['movieId_encoded'].values, dt['rating'].values, dt['genres_list'].values)
 
 train_data, test_data = random_split(dataset, [int(len_*0.8), int(len_*0.2)], generator=generator)
 
@@ -111,7 +136,7 @@ torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 device =torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 model = RecSysBaseMN(user_emb_size=dt['userId_encoded'].nunique(),
                    movie_emb_size=dt['movieId_encoded'].nunique(),
-                   embeding_dim=50, reduce_num=64).to(device)
+                   embeding_dim=50, reduce_num=64, len_genres=max_len_genres).to(device)
 criterion = nn.MSELoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
 best_loss = float('inf')
@@ -125,11 +150,13 @@ for epoch in range(num_epochs):
         users = batch[0]
         movies = batch[1]
         target = batch[2]
+        genres = batch[3]
         optimizer.zero_grad()
         users = users.to(device)
         movies = movies.to(device)
         target = target.to(device)
-        output = model(user_id=users, film_id=movies)
+        genres = genres.to(device)
+        output = model(user_id=users, film_id=movies, genres=genres)
         
         loss = criterion(output, target)
         loss.backward()
@@ -140,11 +167,12 @@ for epoch in range(num_epochs):
     loss_test = 0
     with torch.no_grad():
         for batch in test_dataloader:
-            user, movie, target = batch
+            user, movie, target, genres = batch
             user = user.to(device)
             movie = movie.to(device)
             target = target.to(device)
-            output = model(user_id = user, film_id = movie)
+            genres = genres.to(device)
+            output = model(user_id = user, film_id = movie, genres=genres)
             loss = criterion(output, target)
             all_preds.append(loss.item())
             loss_test += loss.item()
@@ -160,10 +188,51 @@ for epoch in range(num_epochs):
     print(f"Loss epoch : {math.sqrt(sum(losses)/len(losses))}, validation = {math.sqrt(loss_test/len(test_dataloader))}")
 model = RecSysBaseMN(user_emb_size=dt['userId_encoded'].nunique(),
                    movie_emb_size=dt['movieId_encoded'].nunique(),
-                   embeding_dim=50, reduce_num=64).to(device)
+                   embeding_dim=50, reduce_num=64, len_genres=max_len_genres).to(device)
 model.load_state_dict(torch.load('best_model.pth'))
 model.to(device)
-recommended_for_user(model, dt, device, 42, label_encoder_movie, k=5)
+
+def recommended_for_user(model, dt, device, user_id_encoded, label_encoder_movie, movie_genre_dict, k=5):
+    
+    
+    movies_all = list(movie_genre_dict.keys())
+    
+    
+    movies_watched = dt[dt['userId'] == user_id_encoded]['movieId_encoded'].unique()
+    
+    
+    candidates = list(set(movies_all) - set(movies_watched))
+    
+    if not candidates:
+        print("User has seen all movies!")
+        return
+
+    
+    
+    candidate_genres_list = [movie_genre_dict[movie_id] for movie_id in candidates]
+    
+    
+    movies_tensor = torch.tensor(candidates, dtype=torch.long).to(device)
+    genres_tensor = torch.tensor(candidate_genres_list, dtype=torch.float32).to(device)
+    
+    
+    user_tensor = torch.tensor([user_id_encoded] * len(candidates), dtype=torch.long).to(device)
+    
+    model.eval()
+    with torch.no_grad():
+        
+        predictions = model(user_id=user_tensor, film_id=movies_tensor, genres=genres_tensor)
+        
+        
+        values, top_indices = torch.topk(predictions, k)
+        
+        
+        top_movie_ids_encoded = [candidates[i] for i in top_indices.cpu().numpy()]
+        
+        real_movie_ids = label_encoder_movie.inverse_transform(top_movie_ids_encoded)
+        print(f"Top {k} recommendations for user {user_id_encoded}: {real_movie_ids}")
+movie_genre_dict = dt.drop_duplicates('movieId_encoded').set_index('movieId_encoded')['genres_list'].to_dict()
+recommended_for_user(model, dt, device, 42, label_encoder_movie, movie_genre_dict, k=5)
 
 
 
