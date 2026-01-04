@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import math
+import random
 from torch.utils.data import DataLoader
 from torch.utils.data import Dataset
 from torch.utils.data import random_split
@@ -26,9 +27,8 @@ class RecSysBase(nn.Module):
     
         return (temp_res.sum(1) + user_bias + film_bias)
 class RecSysBaseMN(nn.Module):
-    def __init__(self, user_emb_size, movie_emb_size, embeding_dim, reduce_num, len_genres, max_rating=5):
+    def __init__(self, user_emb_size, movie_emb_size, embeding_dim, reduce_num, len_genres):
         super().__init__()
-        self.max_rating = max_rating
         self.embeding_user = nn.Embedding(user_emb_size, embeding_dim)
         self.embeding_film = nn.Embedding(movie_emb_size, embeding_dim)
         
@@ -53,7 +53,7 @@ class RecSysBaseMN(nn.Module):
         x = self.drop(x)
         x = self.lin3(x).squeeze()
     
-        return self.sigmoid(x) * self.max_rating
+        return x
     
 class MovieDataset(Dataset):
     def __init__(self, user_ids, movie_ids, ratings, genres):
@@ -78,9 +78,9 @@ df_genres = pd.read_csv('D://MyFiles//MLLEarning//AI_ML_learining//recSys//Datas
 
 dt = dt.merge(df_genres, on='movieId', how='left')
 
-len_ = 20000
 
-dt = dt[:len_]
+
+dt = dt[:20000]
 genres = set()
 
 genres = dt['genres'].dropna().str.split('|').explode().unique().tolist()
@@ -110,27 +110,28 @@ def prepare_list_genres(genre_string):
 
 
 dt['genres_list'] = dt['genres'].apply(prepare_list_genres)
-print(dt.head())
+dt = dt[dt['rating'] >= 3.0].copy().reset_index(drop=True)
+
 generator = torch.Generator().manual_seed(42)
 
 
 label_encoder_user = LabelEncoder()
 label_encoder_movie = LabelEncoder()
-print(dt.head())
+
 
 
 label_encoder_user.fit(dt['userId'])
 label_encoder_movie.fit(dt['movieId'])
 
 print(label_encoder_user.classes_)
-
+len_ = len(dt)
 dt['userId_encoded'] = label_encoder_user.transform(dt['userId'])
 dt['movieId_encoded'] = label_encoder_movie.transform(dt['movieId'])
 
 dataset = MovieDataset(dt['userId_encoded'].values, dt['movieId_encoded'].values, dt['rating'].values, dt['genres_list'].values)
 
 train_data, test_data = random_split(dataset, [int(len_*0.8), int(len_*0.2)], generator=generator)
-
+movie_genre_dict = dt.drop_duplicates('movieId_encoded').set_index('movieId_encoded')['genres_list'].to_dict()
 train_dataloader = torch.utils.data.DataLoader(train_data, batch_size=32, shuffle=True)
 test_dataloader = torch.utils.data.DataLoader(test_data, batch_size=32, shuffle=False)
 torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -139,6 +140,8 @@ model = RecSysBaseMN(user_emb_size=dt['userId_encoded'].nunique(),
                    movie_emb_size=dt['movieId_encoded'].nunique(),
                    embeding_dim=50, reduce_num=64, len_genres=max_len_genres).to(device)
 criterion = nn.MSELoss()
+bceCross = nn.BCEWithLogitsLoss()
+
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
 best_loss = float('inf')
 num_epochs = 5
@@ -148,18 +151,27 @@ for epoch in range(num_epochs):
     loss_val = 0
     losses = []
     for i, batch in enumerate(train_dataloader):
-        users = batch[0]
-        movies = batch[1]
-        target = batch[2]
-        genres = batch[3]
-        optimizer.zero_grad()
-        users = users.to(device)
-        movies = movies.to(device)
-        target = target.to(device)
-        genres = genres.to(device)
-        output = model(user_id=users, film_id=movies, genres=genres)
+        user, movie, target, genres = batch
         
-        loss = criterion(output, target)
+        movie_neg = torch.randint(0, movie.shape(0), (batch_size,)).to(device)
+        candidate_genres_list = [movie_genre_dict[movie_id] for movie_id in movie_neg.cpu().numpy()]
+        genres_neg = candidate_genres_list
+        optimizer.zero_grad()
+        batch_size = user.size(0)
+        users_all = torch.cat([user, user]) # Юзер тот же
+        movies_all = torch.cat([movie, movie_neg])
+        genres_all = torch.cat([genres, genres_neg])
+
+        users = users_all.to(device)
+        movies = movies_all.to(device)
+        genres = genres_all.to(device)
+        target_pos = torch.ones(batch_size, dtype=torch.float32).to(device)
+        target_neg = torch.zeros(batch_size, dtype=torch.float32).to(device)
+        target = torch.cat([target_pos, target_neg])
+
+        output = model(user_id=users_all, film_id=movies_all, genres=genres_all)
+        
+        loss = bceCross(output, target)
         loss.backward()
         optimizer.step()
         losses.append(loss.item())
@@ -174,19 +186,20 @@ for epoch in range(num_epochs):
             target = target.to(device)
             genres = genres.to(device)
             output = model(user_id = user, film_id = movie, genres=genres)
-            loss = criterion(output, target)
+            loss = bceCross(output, target)
             all_preds.append(loss.item())
             loss_test += loss.item()
             
-        rms_loss_val = math.sqrt(loss_test/len(test_dataloader))
+        #rms_loss_val = math.sqrt(loss_test/len(test_dataloader))
         if epoch == 0:
-            best_loss = rms_loss_val
-        if best_loss > rms_loss_val:
-            print(f"New best model found at epoch {epoch} with loss {rms_loss_val}")
+            best_loss = loss_test
+        if best_loss > loss_test:
+            print(f"New best model found at epoch {epoch} with loss {loss_test}")
             torch.save(model.state_dict(), 'best_model.pth')
-            best_loss = rms_loss_val
+            best_loss = loss_test
     
-    print(f"Loss epoch : {math.sqrt(sum(losses)/len(losses))}, validation = {math.sqrt(loss_test/len(test_dataloader))}")
+    print(f"Loss epoch : {sum(losses)/len(losses)}, validation = {loss_test/len(test_dataloader)}")
+
 model = RecSysBaseMN(user_emb_size=dt['userId_encoded'].nunique(),
                    movie_emb_size=dt['movieId_encoded'].nunique(),
                    embeding_dim=50, reduce_num=64, len_genres=max_len_genres).to(device)
@@ -233,10 +246,7 @@ def recommended_for_user(model, dt, device, user_id_encoded, label_encoder_movie
         
         real_movie_ids = label_encoder_movie.inverse_transform(top_movie_ids_encoded)
         print(f"Top {k} recommendations for user {user_id_encoded}: {real_movie_ids}")
-import random
 
-import random
-import torch
 
 def evaluate_one_case(model, user_id, true_item_id, all_movie_ids_set, user_interacted_items, movie_genre_dict, device, k=10):
     """
@@ -313,7 +323,7 @@ def evaluate_global(model, test_dataset, all_movie_ids, user_interacted_dict, mo
     return hits / count if count > 0 else 0
     
 
-movie_genre_dict = dt.drop_duplicates('movieId_encoded').set_index('movieId_encoded')['genres_list'].to_dict()
+
 all_movie_ids = dt['movieId_encoded'].unique()
 user_interacted_dict = dt.groupby('userId_encoded')['movieId_encoded'].apply(set).to_dict()
 result = evaluate_global(model, test_dataset=test_data, all_movie_ids=all_movie_ids,user_interacted_dict=user_interacted_dict, movie_genre_dict=movie_genre_dict,device=device, k=10)
