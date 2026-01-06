@@ -9,51 +9,48 @@ import pandas as pd
 from sklearn.preprocessing import LabelEncoder
 import numpy as np
 
-class RecSysBase(nn.Module):
-    def __init__(self, user_emb_size, movie_emb_size, embeding_dim):
+
+
+class NeuMF(nn.Module):
+    def __init__(self, num_users, num_items, gmf_emb_dim, mlp_emb_dim, mlp_hidden_dims, len_genres, genres_emb):
         super().__init__()
-        self.embeding_user = nn.Embedding(user_emb_size, embeding_dim)
-        self.embeding_film = nn.Embedding(movie_emb_size, embeding_dim)
-        self.embeding_user_bias = nn.Embedding(user_emb_size, 1)
-        self.embeding_item_bias = nn.Embedding(movie_emb_size, 1)
+        # gmf part
+        self.gmf_user_emb = nn.Embedding(num_users, gmf_emb_dim)
+        self.gmf_item_emb = nn.Embedding(num_items, gmf_emb_dim)
+
+        # mlp part
+        self.mlp_user_emb = nn.Embedding(num_users, mlp_emb_dim)
+        self.mlp_item_emb = nn.Embedding(num_items, mlp_emb_dim)
         
-    def forward(self, user_id, film_id):
-        user_vec = self.embeding_user(user_id)
-        film_vec = self.embeding_film(film_id)
-        user_bias = self.embeding_user_bias(user_id).squeeze()
-        film_bias = self.embeding_item_bias(film_id).squeeze()
+        self.genres_lin = nn.Linear(len_genres, genres_emb)
+        layers = []
+        input_dim = mlp_emb_dim * 2 + genres_emb
+        # создаем список слоев для обработки ML башенкой
+        for hidden_dim in mlp_hidden_dims:
+            layers.append(nn.Linear(input_dim, hidden_dim))
+            layers.append(nn.ReLU())
+            layers.append(nn.Dropout(0.2))
+            input_dim = hidden_dim
+            
+        self.mlp_layers = nn.Sequential(*layers)
         
-        temp_res = user_vec * film_vec
+        self.final_layer = nn.Linear(gmf_emb_dim + mlp_hidden_dims[-1], 1)
+        
+    def forward(self, user_indices, item_indices, genres_vec):
+        x_user_gmf = self.gmf_user_emb(user_indices)
+        y_item_gmf = self.gmf_item_emb(item_indices)
+        x_gmf = x_user_gmf * y_item_gmf
+        x_user_mlp = self.mlp_user_emb(user_indices)
+        x_item_mlp = self.mlp_item_emb(item_indices)
+        x_genres = self.genres_lin(genres_vec)
+
+        x_mlp_layer = torch.cat([x_user_mlp, x_item_mlp, x_genres], dim=1)
+        x_mlp_layer = self.mlp_layers(x_mlp_layer)
+
+        vector = torch.cat([x_gmf, x_mlp_layer], dim=1)
+        return self.final_layer(vector).squeeze()
     
-        return (temp_res.sum(1) + user_bias + film_bias)
-class RecSysBaseMN(nn.Module):
-    def __init__(self, user_emb_size, movie_emb_size, embeding_dim, reduce_num, len_genres):
-        super().__init__()
-        self.embeding_user = nn.Embedding(user_emb_size, embeding_dim)
-        self.embeding_film = nn.Embedding(movie_emb_size, embeding_dim)
         
-        self.lin1 = nn.Linear(embeding_dim*3, reduce_num)
-        self.lin2 = nn.Linear(reduce_num, reduce_num//2)
-        self.lin3 = nn.Linear(reduce_num//2, 1)
-        self.lin_genres = nn.Linear(len_genres, embeding_dim)
-        self.relu = nn.ReLU()
-        self.sigmoid = nn.Sigmoid()
-        self.drop = nn.Dropout(0.2)
-    def forward(self, user_id, film_id, genres=None):
-        user_vec = self.embeding_user(user_id)
-        
-        film_vec = self.embeding_film(film_id)
-        genres_x = self.lin_genres(genres)
-        temp_res = torch.cat((user_vec, film_vec, genres_x), dim=1)
-        
-        x = self.lin1(temp_res)
-        x = self.relu(x)
-        x = self.lin2(x)
-        x = self.relu(x)
-        x = self.drop(x)
-        x = self.lin3(x).squeeze()
-    
-        return x
     
 class MovieDataset(Dataset):
     def __init__(self, user_ids, movie_ids, ratings, genres):
@@ -126,7 +123,7 @@ def evaluate_one_case(model, user_id, true_item_id, all_movie_ids_set, user_inte
     ndcg = 0
     result = []
     with torch.no_grad():
-        output = model(user_id=user_tensor, film_id=movies_tensor, genres=genres_tensor)
+        output = model(user_indices=user_tensor, item_indices=movies_tensor, genres_vec=genres_tensor)
         if random.random() < 0.01: # 1% шанс срабатывания
             print(f"\n--- DEBUG CASE ---")
             print(f"Target Index: {target_idx}")
@@ -140,7 +137,6 @@ def evaluate_one_case(model, user_id, true_item_id, all_movie_ids_set, user_inte
             print(f"Is Hit: {is_hit}")
             print("------------------\n")
         values, top_indices = torch.topk(output, k)
-        print(top_indices)
         # if target_idx in top_indices.cpu().numpy().tolist() else -1            
         if target_idx in top_indices.cpu().tolist():
             indx = top_indices.cpu().numpy().tolist().index(target_idx)
@@ -227,18 +223,22 @@ movie_genre_dict = dt.drop_duplicates('movieId_encoded').set_index('movieId_enco
 train_dataloader = torch.utils.data.DataLoader(train_data, batch_size=32, shuffle=True)
 test_dataloader = torch.utils.data.DataLoader(test_data, batch_size=32, shuffle=False)
 torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-device =torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-model = RecSysBaseMN(user_emb_size=dt['userId_encoded'].nunique(),
-                   movie_emb_size=dt['movieId_encoded'].nunique(),
-                   embeding_dim=50, reduce_num=64, len_genres=max_len_genres).to(device)
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+model = NeuMF(num_users=dt['userId_encoded'].nunique(),
+    num_items=dt['movieId_encoded'].nunique(),
+    gmf_emb_dim = 32,
+    mlp_emb_dim = 32,
+    mlp_hidden_dims = [64,32,16],
+    len_genres=max_len_genres,
+    genres_emb=16).to(device)
 bceCross = nn.BCEWithLogitsLoss()
 all_movie_ids = dt['movieId_encoded'].unique()
 user_interacted_dict = dt.groupby('userId_encoded')['movieId_encoded'].apply(set).to_dict()
-#all_movie_genres = torch.tensor([movie_genre_dict[movie_id] for movie_id in all_movie_ids], dtype=torch.float32).to(device)
 
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
 best_loss = float('inf')
-num_epochs = 5
+num_epochs = 10
 for epoch in range(num_epochs):
     model.train()
     loss = 0
@@ -266,8 +266,7 @@ for epoch in range(num_epochs):
         target_pos = torch.ones(batch_size, dtype=torch.float32).to(device)
         target_neg = torch.zeros(batch_size, dtype=torch.float32).to(device)
         target = torch.cat([target_pos, target_neg])
-
-        output = model(user_id=users_all, film_id=movies_all, genres=genres_all)
+        output = model(user_indices=users_all, item_indices=movies_all, genres_vec=genres_all)
         
         loss = bceCross(output, target)
         loss.backward()
@@ -287,21 +286,19 @@ for epoch in range(num_epochs):
     
     print(f"Loss epoch : {sum(losses)/len(losses)}, validation = {result}")
 
-model = RecSysBaseMN(user_emb_size=dt['userId_encoded'].nunique(),
-                   movie_emb_size=dt['movieId_encoded'].nunique(),
-                   embeding_dim=50, reduce_num=64, len_genres=max_len_genres).to(device)
+model = NeuMF(num_users=dt['userId_encoded'].nunique(),
+    num_items=dt['movieId_encoded'].nunique(),
+    gmf_emb_dim = 32,
+    mlp_emb_dim = 32,
+    mlp_hidden_dims = [64,32,16],
+    len_genres=max_len_genres,
+    genres_emb=16).to(device)
 model.load_state_dict(torch.load('best_model.pth'))
 model.to(device)
 
 def recommended_for_user(model, dt, device, user_id_encoded, label_encoder_movie, movie_genre_dict, k=5):
-    
-    
-    
     movies_all = list(movie_genre_dict.keys())
-    
-    
-    movies_watched = dt[dt['userId'] == user_id_encoded]['movieId_encoded'].unique()
-    
+    movies_watched = dt[dt['userId_encoded'] == user_id_encoded]['movieId_encoded'].unique()
     
     candidates = list(set(movies_all) - set(movies_watched))
     
@@ -323,7 +320,7 @@ def recommended_for_user(model, dt, device, user_id_encoded, label_encoder_movie
     model.eval()
     with torch.no_grad():
         
-        predictions = model(user_id=user_tensor, film_id=movies_tensor, genres=genres_tensor)
+        predictions = model(user_indices=user_tensor, item_indices=movies_tensor, genres_vec=genres_tensor)
         
         
         values, top_indices = torch.topk(predictions, k)
