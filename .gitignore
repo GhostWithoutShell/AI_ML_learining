@@ -13,4 +13,6 @@ audio_processing/idm_gan_autoencoder/tensors*
 audio_processing/idm_gan_autoencoder/art_frames*
 audio_processing/idm_gan_autoencoder/idm_mels*
 recSys/Datasets*
-recSys/best_model.pth
+.claude
+recSys/movieLens/*.pth
+recSys/*.pth
