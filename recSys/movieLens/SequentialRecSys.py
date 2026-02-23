@@ -91,7 +91,7 @@ def MRR(model, test_dataset,targets, inputs, chunk_size): # mean reciprocal rank
     with torch.no_grad():
         model.eval()
         mrr_sum = 0.0
-        num_k = 250
+        num_k = 500
         #chunks = torch.split(all_targets, chunk_size)
         all_movie_ids = test_dataset.dataset.all_movies_ids
 
@@ -111,12 +111,12 @@ def MRR(model, test_dataset,targets, inputs, chunk_size): # mean reciprocal rank
 encoder = LabelEncoder()
 encoder_user = LabelEncoder()
 
+base_url = 'D://MyFiles//MLLEarning//AI_ML_learining//recSys//Datasets//movie_lens_small//archive//ml-latest-small//'
 
 
+dt = pd.read_csv(base_url + 'ratings.csv', usecols=['movieId', 'userId', 'rating', 'timestamp'])
 
-dt = pd.read_csv('D://MyFiles//MLLEarning//AI_ML_learining//recSys//Datasets//movie_lens//rating.csv', usecols=['movieId', 'userId', 'rating', 'timestamp'])
-
-df_genres = pd.read_csv('D://MyFiles//MLLEarning//AI_ML_learining//recSys//Datasets//movie_lens//movie.csv', usecols=['movieId', 'genres'])
+df_genres = pd.read_csv(base_url + 'movies.csv', usecols=['movieId', 'genres'])
 
 dt = dt.merge(df_genres, on='movieId', how='left')
 
@@ -152,8 +152,9 @@ dt['movieId_encoded'] = encoder.transform(dt['movieId'])
 dt['movieId_encoded'] = dt['movieId_encoded'] + 1
 dt['userId_encoded'] = encoder_user.transform(dt['userId'])
 dt['genres_list'] = dt['genres'].apply(prepare_list_genres)
-user_group = dt.sort_values(by='timestamp', ascending=False).groupby('userId_encoded')['movieId_encoded'].apply(list)
-user_group = user_group[user_group.apply(len) > 1]
+# remove ascending false
+user_group = dt.sort_values(by='timestamp').groupby('userId_encoded')['movieId_encoded'].apply(list)
+#user_group = user_group[user_group.apply(len) > 1]
 sequences = user_group.to_dict()
 
 dataset = SequentialDataset(sequences, 4, dt['movieId_encoded'].unique().tolist(), pad_id=PAD_INDEX)
