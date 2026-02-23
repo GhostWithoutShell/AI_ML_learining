@@ -152,7 +152,7 @@ dt['movieId_encoded'] = encoder.transform(dt['movieId'])
 dt['movieId_encoded'] = dt['movieId_encoded'] + 1
 dt['userId_encoded'] = encoder_user.transform(dt['userId'])
 dt['genres_list'] = dt['genres'].apply(prepare_list_genres)
-user_group = dt.sort_values(by='timestamp').groupby('userId_encoded')['movieId_encoded'].apply(list)
+user_group = dt.sort_values(by='timestamp', ascending=False).groupby('userId_encoded')['movieId_encoded'].apply(list)
 user_group = user_group[user_group.apply(len) > 1]
 sequences = user_group.to_dict()
 
@@ -201,11 +201,11 @@ for i in range(num_epochs):
         bpr.backward() 
         optimizer.step()
 
-    if best_loss == math.inf:
-        best_loss = bpr.item()
-    if best_loss > bpr.item():
-        best_loss = bpr.item()
-        torch.save(model.state_dict(), 'best_seqmodel.pth')
+        if best_loss == math.inf:
+            best_loss = bpr.item()
+        if best_loss > bpr.item():
+            best_loss = bpr.item()
+            torch.save(model.state_dict(), 'best_seqmodel.pth')
         
         
         
