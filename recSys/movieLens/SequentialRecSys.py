@@ -1,4 +1,4 @@
-from email import generator
+
 import torch
 import torch.nn as nn
 import math
@@ -87,6 +87,25 @@ class SequentialDataset(Dataset):
             'negative_id' : torch.tensor(negative_movie, dtype = torch.long)
         }
 
+def MRR(model, test_dataset,targets, inputs, chunk_size): # mean reciprocal rank
+    with torch.no_grad():
+        model.eval()
+        mrr_sum = 0.0
+        num_k = 250
+        #chunks = torch.split(all_targets, chunk_size)
+        all_movie_ids = test_dataset.dataset.all_movies_ids
+
+        for i in range(len(test_dataset)):
+            history = inputs[i]
+            samples = random.sample(all_movie_ids, num_k)
+            samples[0] = targets[i].item()
+            history_repeated = history.unsqueeze(0).repeat(len(samples), 1).to(device)
+            score = model(history_repeated, torch.tensor(samples, dtype=torch.long).to(device))
+            rank = (score > score[0]).sum().item() + 1
+            repousal_rank = 1/rank
+            mrr_sum += repousal_rank
+
+        return mrr_sum / len(test_dataset)
 
 
 encoder = LabelEncoder()
@@ -143,11 +162,8 @@ proportions = [.75, .10, .15]
 lengths = [int(p * len(dataset)) for p in proportions]
 lengths[-1] = len(dataset) - sum(lengths[:-1])
 
-sequences_list = sequences_list[:130000]
-sequences = dict(sequences_list)
-print(len(sequences))
-num_epochs = 6
-lr = 1e-3
+num_epochs = 5
+lr = 3e-4
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 model = SeqRecModel(dt['movieId_encoded'].max() + 1, 64, 32)
 model = model.to(device)
@@ -164,7 +180,7 @@ loss = BPRLoss()
 best_loss = math.inf
 for i in range(num_epochs):
     model.train()
-    optimizer.zero_grad()
+    
     bpr = 0
     for batch in train_dataloader:
     
@@ -177,22 +193,38 @@ for i in range(num_epochs):
         target_items = target_items.to(device)
         output_pos = model(history, target_items)
         output_neg = model(history, neg_items)
-    
+
 
     
         bpr = loss(output_pos, output_neg)
-        if best_loss == math.inf:
-            best_loss = bpr.item()
-        if best_loss > bpr.item():
-            best_loss = bpr.item()
-            torch.save(model.state_dict(), 'best_seqmodel.pth')
-    
+        optimizer.zero_grad()
         bpr.backward() 
         optimizer.step()
+
+    if best_loss == math.inf:
+        best_loss = bpr.item()
+    if best_loss > bpr.item():
+        best_loss = bpr.item()
+        torch.save(model.state_dict(), 'best_seqmodel.pth')
+        
+        
+        
     print(f"Epoch {i+1}, BPR losss : {bpr.item()}")
 
 model.load_state_dict(torch.load('best_seqmodel.pth'))
+targets = []
+inputs = []
 
+
+for i in range(len(test_data)):
+    item = test_data[i]
+    targets.append(item['target_id'])
+    inputs.append(item['input_ids'])
+print(len(test_data))
+print(len(targets))
+mrrResult = MRR(model=model,test_dataset=test_data,targets=targets, inputs=inputs, chunk_size=128)
+
+print(f'MRR result {mrrResult}')
 
         
 
