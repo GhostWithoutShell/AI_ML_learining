@@ -8,9 +8,15 @@ from torch.utils.data import random_split
 import pandas as pd
 from sklearn.preprocessing import LabelEncoder
 import numpy as np
+import torch.nn.functional as F
 
-
-
+class BPRLoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+    def forward(self, pos_samples, neg_samples):
+        diff = pos_samples-neg_samples
+        x = F.softplus(-diff)
+        return x.mean()
 class NeuMF(nn.Module):
     def __init__(self, num_users, num_items, gmf_emb_dim, mlp_emb_dim, mlp_hidden_dims, len_genres, genres_emb):
         super().__init__()
@@ -53,15 +59,25 @@ class NeuMF(nn.Module):
         
     
 class MovieDataset(Dataset):
-    def __init__(self, user_ids, movie_ids, ratings, genres):
+    def __init__(self, user_ids, movie_ids, ratings, genres, all_movie_ids, user_interacted_dict=None, movie_genre_dict=None):
         self.users = torch.tensor(user_ids, dtype=torch.long)
         self.movies = torch.tensor(movie_ids, dtype=torch.long)
         self.ratings = torch.tensor(ratings, dtype=torch.float32)
         self.genres = torch.tensor(np.stack(genres), dtype=torch.float32)
+        self.user_interacted_dict = user_interacted_dict
+        self.genres_dict = movie_genre_dict
+        self.all_movie_ids = all_movie_ids
     def __len__(self):
         return len(self.ratings)
     def __getitem__(self, idx):
-        return (self.users[idx], self.movies[idx], self.ratings[idx], self.genres[idx])
+        rand_idx = random.randint(0, len(self.all_movie_ids)-1)
+        user = self.users[idx]
+        if self.user_interacted_dict and user.item() in self.user_interacted_dict:
+            while self.all_movie_ids[rand_idx] in self.user_interacted_dict[user.item()]:
+                rand_idx = random.randint(0, len(self.all_movie_ids)-1)
+
+        neg_genre = self.genres_dict[self.all_movie_ids[rand_idx]]
+        return (self.users[idx], self.movies[idx], self.ratings[idx], self.genres[idx], self.all_movie_ids[rand_idx], neg_genre)
 
     def getAllMovies(self):
         return list(self.movies)
@@ -90,7 +106,7 @@ max_len_genres = len(genres)
 #mlb = MultiLabelBinarizer()
 #temp_ser = dt['genres'].str.split('|')
 #genre_vector = mlb.fit_transform(temp_ser)
-#print(genre_vector)
+
 def evaluate_one_case(model, user_id, true_item_id, all_movie_ids_set, user_interacted_items, movie_genre_dict, device, k=10):
     """
     user_id: int - ID пользователя
@@ -99,45 +115,26 @@ def evaluate_one_case(model, user_id, true_item_id, all_movie_ids_set, user_inte
     user_interacted_items: set - множество фильмов, которые этот юзер УЖЕ видел (история)
     """
     
-    # 1. Негативный сэмплинг
-    # Ищем фильмы, которые есть в базе, но юзер их не видел
-    # ВАЖНО: исключаем true_item_id, чтобы случайно не добавить его как негатив
     possible_candidates = all_movie_ids_set - user_interacted_items - {true_item_id}
     
-    # Берем 99 случайных
     negative_samples = random.sample(list(possible_candidates), 99)
     
-    # 2. Формируем список: 99 плохих + 1 хороший (в конце)
-    candidates = negative_samples + [true_item_id]
-    target_idx = 99 # Индекс нашего правильного фильма (он последний)
     
-    # 3. Подготовка данных
+    candidates = negative_samples + [true_item_id]
+    target_idx = 99
+    
     candidate_genres_list = [movie_genre_dict[movie_id] for movie_id in candidates]
     
     user_tensor = torch.tensor([user_id] * 100, dtype=torch.long).to(device)
     movies_tensor = torch.tensor(candidates, dtype=torch.long).to(device)
     genres_tensor = torch.tensor(candidate_genres_list, dtype=torch.float32).to(device)
     
-    # 4. Предикт
     model.eval()
     ndcg = 0
     result = []
     with torch.no_grad():
         output = model(user_indices=user_tensor, item_indices=movies_tensor, genres_vec=genres_tensor)
-        if random.random() < 0.01: # 1% шанс срабатывания
-            print(f"\n--- DEBUG CASE ---")
-            print(f"Target Index: {target_idx}")
-            print(f"Model Outputs (First 5): {output[:5].cpu().numpy()}")
-            print(f"Model Output (Target): {output[target_idx].item()}")
-
-            values, top_indices = torch.topk(output, k)
-            print(f"Top K Indices: {top_indices.cpu().tolist()}")
-
-            is_hit = target_idx in top_indices.cpu().tolist()
-            print(f"Is Hit: {is_hit}")
-            print("------------------\n")
-        values, top_indices = torch.topk(output, k)
-        # if target_idx in top_indices.cpu().numpy().tolist() else -1            
+        values, top_indices = torch.topk(output, k)    
         if target_idx in top_indices.cpu().tolist():
             indx = top_indices.cpu().numpy().tolist().index(target_idx)
             indx = indx + 2
@@ -153,7 +150,7 @@ def evaluate_global(model, test_dataset, all_movie_ids, user_interacted_dict, mo
     all_movie_ids_set = set(all_movie_ids) # Превращаем в set один раз для скорости
     
     
-    for user, movie, rating, _ in test_dataset:
+    for user, movie, rating, _, _, _ in test_dataset:
         u_id = user.item()
         m_id = movie.item()
         
@@ -215,11 +212,14 @@ len_ = len(dt)
 print(int(len_*0.8), int(len_*0.2))
 dt['userId_encoded'] = label_encoder_user.transform(dt['userId'])
 dt['movieId_encoded'] = label_encoder_movie.transform(dt['movieId'])
-
-dataset = MovieDataset(dt['userId_encoded'].values, dt['movieId_encoded'].values, dt['rating'].values, dt['genres_list'].values)
+user_interacted_dict = dt.groupby('userId_encoded')['movieId_encoded'].apply(set).to_dict()
+all_movie_ids = dt['movieId_encoded'].unique()
+movie_genre_dict = dt.drop_duplicates('movieId_encoded').set_index('movieId_encoded')['genres_list'].to_dict()
+dataset = MovieDataset(dt['userId_encoded'].values, dt['movieId_encoded'].values, dt['rating'].values, dt['genres_list'].values, 
+                       all_movie_ids=all_movie_ids, user_interacted_dict=user_interacted_dict, movie_genre_dict=movie_genre_dict)
 
 train_data, test_data = random_split(dataset, [int(len_*0.8), int(len_*0.2)], generator=generator)
-movie_genre_dict = dt.drop_duplicates('movieId_encoded').set_index('movieId_encoded')['genres_list'].to_dict()
+
 train_dataloader = torch.utils.data.DataLoader(train_data, batch_size=32, shuffle=True)
 test_dataloader = torch.utils.data.DataLoader(test_data, batch_size=32, shuffle=False)
 torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -233,32 +233,33 @@ model = NeuMF(num_users=dt['userId_encoded'].nunique(),
     len_genres=max_len_genres,
     genres_emb=16).to(device)
 bceCross = nn.BCEWithLogitsLoss()
-all_movie_ids = dt['movieId_encoded'].unique()
-user_interacted_dict = dt.groupby('userId_encoded')['movieId_encoded'].apply(set).to_dict()
 
+
+bpe = BPRLoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
 best_loss = float('inf')
 num_epochs = 10
 for epoch in range(num_epochs):
     model.train()
     loss = 0
+    loss_bpe = 0
     loss_val = 0
     losses = []
     for i, batch in enumerate(train_dataloader):
-        user, movie, target, genres = batch
+        user, movie, target, genres, neg_movie, neg_genres = batch
         batch_size = user.size(0)
         movie = movie.to(device)
         user = user.to(device)
         genres = genres.to(device)
         target = target.to(device)
-        movie_neg = torch.randint(0, dt['movieId_encoded'].nunique(), (batch_size,)).to(device)
-        candidate_genres_list = [movie_genre_dict[movie_id] for movie_id in movie_neg.cpu().numpy()]
-        genres_neg = torch.tensor(candidate_genres_list, dtype=torch.float32).to(device)
+        neg_movie = neg_movie.to(device)
+        neg_genres = neg_genres.to(device)
         optimizer.zero_grad()
-        
+        pos = (user, movie, genres)
+        neg = (user, neg_movie, neg_genres)
         users_all = torch.cat([user, user]) # Юзер тот же
-        movies_all = torch.cat([movie, movie_neg])
-        genres_all = torch.cat([genres, genres_neg])
+        movies_all = torch.cat([movie, neg_movie])
+        genres_all = torch.cat([genres, neg_genres])
 
         users = users_all.to(device)
         movies = movies_all.to(device)
@@ -266,12 +267,15 @@ for epoch in range(num_epochs):
         target_pos = torch.ones(batch_size, dtype=torch.float32).to(device)
         target_neg = torch.zeros(batch_size, dtype=torch.float32).to(device)
         target = torch.cat([target_pos, target_neg])
-        output = model(user_indices=users_all, item_indices=movies_all, genres_vec=genres_all)
+        output = model(user_indices=pos[0], item_indices=pos[1], genres_vec=pos[2])
+        output_neg = model(user_indices=neg[0], item_indices=neg[1], genres_vec=neg[2])
         
-        loss = bceCross(output, target)
-        loss.backward()
+        loss_bpe = bpe(output[:batch_size], output_neg[:batch_size])
+        
+        #loss = bceCross(output, target)
+        loss_bpe.backward()
         optimizer.step()
-        losses.append(loss.item())
+        losses.append(loss_bpe.item())
     model.eval()
     all_preds = []
     loss_test = 0
@@ -280,11 +284,11 @@ for epoch in range(num_epochs):
         if epoch == 0:
             best_loss = result
         if result > best_loss:
-            print(f"New best model found at epoch {epoch} with loss {result}")
+            print(f"New best model found at epoch {epoch} with loss {result}, loss_bpe = {loss_bpe}")
             torch.save(model.state_dict(), 'best_model.pth')
             best_loss = result
     
-    print(f"Loss epoch : {sum(losses)/len(losses)}, validation = {result}")
+    print(f"Loss epoch : {sum(losses)/len(losses)}, validation = {result}, BPE loss = {loss_bpe}")
 
 model = NeuMF(num_users=dt['userId_encoded'].nunique(),
     num_items=dt['movieId_encoded'].nunique(),
